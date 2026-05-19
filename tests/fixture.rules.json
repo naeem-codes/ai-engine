@@ -1,0 +1,24 @@
+{
+  "model": "TestMirror",
+  "limits": {
+    "min_width_mm": 300,
+    "max_width_mm": 1500,
+    "min_height_mm": 400,
+    "max_height_mm": 2000
+  },
+  "rules": [
+    {
+      "trigger": "width",
+      "dimensions": [
+        {"name": "WIDTH@Mirror", "ratio": 1.0},
+        {"name": "LED_WIDTH@LED", "ratio": 0.9}
+      ]
+    },
+    {
+      "trigger": "height",
+      "dimensions": [
+        {"name": "HEIGHT@Mirror", "ratio": 1.0}
+      ]
+    }
+  ]
+}

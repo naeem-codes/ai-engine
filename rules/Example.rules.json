@@ -1,0 +1,17 @@
+{
+  "model": "Example",
+  "limits": {
+    "min_width_mm": 300,
+    "max_width_mm": 1500,
+    "min_height_mm": 400,
+    "max_height_mm": 2000
+  },
+  "rules": [
+    {
+      "trigger": "width",
+      "dimensions": [
+        {"name": "WIDTH@Part1@Example.SLDPRT", "ratio": 1.0}
+      ]
+    }
+  ]
+}
