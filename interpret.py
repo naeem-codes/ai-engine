@@ -57,16 +57,27 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         )
         return InterpretResponse(changes=changes, explanation=explanation)
 
-    if req.assembly_context:
+    if req.dim_axis_labels:
         # Case 2: classification — AI classifies dims by axis, we calculate ratios
-        large_dims = [d for d in req.dimensions if d.value_meters >= 0.3]
+        large_dims = [d for d in req.dimensions if d.value_meters >= 0.05]
         dim_list = "\n".join(
-            f"  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
+            f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
             for d in large_dims
-        ) or "  (no dimensions ≥ 300 mm found)"
+        ) or "  (no dimensions >= 50 mm found)"
+
+        _dependent_keywords = ("related", "corresponding", "dependent", "and everything")
+        is_dependent = req.assembly_context and any(
+            kw in req.instruction.lower() for kw in _dependent_keywords
+        )
+        context_for_prompt = req.assembly_context if is_dependent else None
 
         raw = await call_llm(
-            classification_prompt(req.assembly_context, dim_list),
+            classification_prompt(
+                context_for_prompt,
+                dim_list,
+                master_width_dim=req.master_width_dim,
+                master_height_dim=req.master_height_dim,
+            ),
             req.instruction,
             max_tokens=2048,
         )
@@ -78,12 +89,24 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         if "error" in data:
             return InterpretResponse(error=data["error"])
 
+        # SINGLE scope: AI returned direct changes with "dimension" key
+        if "changes" in data:
+            changes = [
+                DimensionChange(name=c["dimension"], value_meters=c["value_meters"])
+                for c in data["changes"]
+                if c.get("value_meters", 0) > 0
+            ]
+            if not changes:
+                return InterpretResponse(error="AI returned an empty changes list")
+            return InterpretResponse(changes=changes, explanation=data.get("explanation"))
+
+        # OVERALL / DEPENDENT scope: ratio-based scaling
         dims_by_name = {d.name: d.value_meters for d in req.dimensions}
         changes: list[DimensionChange] = []
         axis_errors: list[str] = []
 
         target_w = data.get("target_width_meters")
-        master_w = data.get("master_width_dim")
+        master_w = data.get("master_width_dim") or req.master_width_dim
         width_dims: list[str] = data.get("width_dims") or []
         if target_w and master_w and width_dims:
             master_current = dims_by_name.get(master_w, 0.0)
@@ -97,7 +120,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                     changes.append(DimensionChange(name=dname, value_meters=(current / master_current) * target_w))
 
         target_h = data.get("target_height_meters")
-        master_h = data.get("master_height_dim")
+        master_h = data.get("master_height_dim") or req.master_height_dim
         height_dims: list[str] = data.get("height_dims") or []
         if target_h and master_h and height_dims:
             master_current = dims_by_name.get(master_h, 0.0)

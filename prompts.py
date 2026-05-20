@@ -1,6 +1,6 @@
 def rules_prompt(triggers: list[str]) -> str:
     t = ", ".join(triggers)
-    return f"""You are a SolidWorks CAD dimension assistant for Lumi Design, a custom mirror manufacturer.
+    return f"""You are a SolidWorks CAD dimension assistant.
 The engineer will describe a resize operation on the open CAD model.
 
 This model has smart rules defined for these triggers: {t}
@@ -22,54 +22,104 @@ Rules:
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m"""
 
 
-def classification_prompt(assembly_context: str, dim_list: str) -> str:
-    return f"""You are a SolidWorks assembly resize assistant for Lumi Design, a custom mirror manufacturer.
+def classification_prompt(
+    assembly_context: str | None,
+    dim_list: str,
+    master_width_dim: str | None = None,
+    master_height_dim: str | None = None,
+) -> str:
+    mw = master_width_dim or "null"
+    mh = master_height_dim or "null"
+    context_block = (
+        f"\n-- ASSEMBLY CONTEXT --\n{assembly_context}\n---------------------\n"
+        if assembly_context
+        else ""
+    )
+    return f"""You are a SolidWorks assembly resize assistant.
 
-── YOUR JOB ───────────────────────────────────────────────────────────────────
+-- YOUR JOB ------------------------------------------------------------------
 The user wants to resize the assembly. You must:
   1. Parse the target size(s) from the user instruction
-  2. Identify the MASTER dimension for each axis (the one that defines the assembly width/height)
-  3. Find ALL dependent dimensions that must change when width or height changes
-  4. Return their exact names — the app will calculate new values using ratios
+  2. Determine the SCOPE of the resize (see SCOPE RULES below)
+  3. Return the correct JSON format based on scope
 
 You must NOT calculate or guess new dimension values. Only return names and targets.
 
-── HOW TO FIND DEPENDENT DIMENSIONS ──────────────────────────────────────────
-A dimension is WIDTH-dependent if ANY of these apply:
-  - It is the master WIDTH dimension (named WIDTH, usually in the MIRROR component)
-  - The component has a Width mate or Symmetric mate with the MIRROR
-  - The component bounding box width is proportional to the MIRROR width
-  - The component name suggests it spans the full width (CHASSIS, FRAME, LEDS, HANGER, etc.)
+-- SCOPE RULES ---------------------------------------------------------------
+  SCOPE = OVERALL (default)
+    -> User mentions no specific component name
+    -> Example: "change width to 80 inches", "resize to 24x48"
+    -> Return: width_dims, height_dims, target sizes
 
-A dimension is HEIGHT-dependent if ANY of these apply:
-  - It is the master HEIGHT dimension (named HEIGHT, usually in the MIRROR component)
-  - The component has a Height mate or Symmetric mate related to height
-  - The component bounding box height is proportional to the MIRROR height
-  - The component name suggests it spans the full height
+  SCOPE = SINGLE
+    -> User mentions a specific component but no others
+    -> Example: "change chassis width to 60 inches", "only resize the mirror glass"
+    -> Return: direct changes array with exact dimension name and value in meters
 
-── FULL ASSEMBLY CONTEXT ──────────────────────────────────────────────────────
-{assembly_context}
-───────────────────────────────────────────────────────────────────────────────
+  SCOPE = DEPENDENT
+    -> User mentions a component AND words like "related", "corresponding", "dependent"
+    -> Example: "change chassis width and its corresponding components"
+    -> Use the 3-step process below with ASSEMBLY CONTEXT to find all dependent dims
+    -> Return: width_dims, height_dims, target sizes for all affected components
+{context_block}
+-- DEPENDENT SCOPE: 3-STEP DEPENDENCY IDENTIFICATION ------------------------
+(Only apply when SCOPE = DEPENDENT)
 
-── LARGE DIMENSIONS (≥ 300 mm) — use EXACT names from this list ───────────────
+STEP 1 — Use POSITION to classify each component:
+  - Component Position X is large (|X| > 50 mm) → sits left/right → WIDTH-dependent
+  - Component Position Y is large (|Y| > 50 mm) → sits top/bottom → HEIGHT-dependent
+  - Component at X≈0, Y≈0 → centered, check its dimension names for clues
+
+STEP 2 — Use MATES to extend classification:
+  - If component A is mated to component B and B is already WIDTH-dependent,
+    then A is also WIDTH-dependent (same for HEIGHT)
+  - Follow the mate chain: A→B→C means if B is width-dependent, so is C
+
+STEP 3 — Use SKETCH RELATIONS to confirm:
+  - Equal/Symmetric relations between dims confirm they scale together
+  - Midpoint relations indicate a centered dim — likely master or dependent
+-----------------------------------------------------------------------------
+
+-- HOW TO IDENTIFY DIMENSIONS ------------------------------------------------
+Each dimension below is pre-labeled by the application — trust these labels:
+  [W] = controls width  — include in width_dims
+  [H] = controls height — include in height_dims
+  [?] = internal/fixed  — DO NOT include in either list
+
+Master dims (pre-identified by app — do NOT return in JSON for OVERALL scope):
+  - master_width_dim  = {mw}
+  - master_height_dim = {mh}
+
+-- DIMENSIONS (>= 50 mm) — use EXACT names from this list -------------------
 {dim_list}
-───────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 
-RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences, no extra text.
+RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
 
-Required fields:
-- "target_width_meters"  : new width in meters from instruction, or null if not changing
-- "master_width_dim"     : exact name of the primary WIDTH dimension (from MIRROR component), or null
-- "width_dims"           : array of ALL dimension names that must change when width changes
-- "target_height_meters" : new height in meters from instruction, or null if not changing
-- "master_height_dim"    : exact name of the primary HEIGHT dimension (from MIRROR component), or null
-- "height_dims"          : array of ALL dimension names that must change when height changes
+For OVERALL scope:
+- "target_width_meters"  : new width in meters, or null if not changing
+- "width_dims"           : array of [W] dimension names to scale
+- "target_height_meters" : new height in meters, or null if not changing
+- "height_dims"          : array of [H] dimension names to scale
 - "explanation"          : one sentence describing what is being changed
 
+For DEPENDENT scope:
+- "target_width_meters"  : new width in meters, or null if not changing
+- "master_width_dim"     : the target component's primary [W] dimension name, or null
+- "width_dims"           : array of [W] dimension names to scale
+- "target_height_meters" : new height in meters, or null if not changing
+- "master_height_dim"    : the target component's primary [H] dimension name, or null
+- "height_dims"          : array of [H] dimension names to scale
+- "explanation"          : one sentence describing what is being changed
+
+For SINGLE scope:
+- "changes"     : [{{"dimension": "exact name from list", "value_meters": 0.0}}]
+- "explanation" : one sentence describing what is being changed
+
 Rules:
-- Copy dimension names EXACTLY from the LARGE DIMENSIONS list (include [ComponentName])
-- master_width_dim must be included in width_dims
-- master_height_dim must be included in height_dims
-- Include EVERY component that physically spans the width or height — do not skip any
+- Copy dimension names EXACTLY from the DIMENSIONS list (include [ComponentName])
+- Return names WITHOUT the [W]/[H]/[?] prefix
+- ONLY include [W] dims in width_dims — never [H] or [?]
+- ONLY include [H] dims in height_dims — never [W] or [?]
 - If instruction is unclear: {{"error": "what is unclear"}}
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m"""

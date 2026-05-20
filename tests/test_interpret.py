@@ -9,6 +9,12 @@ from interpret import interpret
 
 FIXTURE = Path(__file__).parent / "fixture.rules.json"
 
+BASE_AXIS_LABELS = {
+    "WIDTH@Mirror": "W",
+    "HEIGHT@Mirror": "H",
+    "LED_WIDTH@LED": "W",
+}
+
 
 @pytest.fixture()
 def rules_dir(tmp_path, monkeypatch):
@@ -73,33 +79,6 @@ async def test_rules_error_from_llm(rules_dir, base_dims):
     assert result.error == "unclear instruction"
 
 
-# ── Case 2: classification (no rules file) ────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_classification_calculates_ratios(base_dims):
-    llm_json = json.dumps({
-        "target_width_meters": 0.762,
-        "master_width_dim": "WIDTH@Mirror",
-        "width_dims": ["WIDTH@Mirror", "LED_WIDTH@LED"],
-        "target_height_meters": None,
-        "master_height_dim": None,
-        "height_dims": [],
-        "explanation": "Resizing width to 30 inches",
-    })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
-        result = await interpret(InterpretRequest(
-            instruction="set width to 30 inches",
-            dimensions=base_dims,
-            assembly_context="ASSEMBLY CONTEXT",
-            model_path=None,
-        ))
-    assert result.error is None
-    width_change = next(c for c in result.changes if c.name == "WIDTH@Mirror")
-    led_change = next(c for c in result.changes if c.name == "LED_WIDTH@LED")
-    assert width_change.value_meters == pytest.approx(0.762)
-    assert led_change.value_meters == pytest.approx((0.45 / 0.5) * 0.762)
-
-
 @pytest.mark.asyncio
 async def test_rules_malformed_json_returns_error(rules_dir, base_dims):
     with patch("interpret.call_llm", new=AsyncMock(return_value="not valid json {")):
@@ -144,6 +123,7 @@ async def test_classification_calculates_ratios(base_dims):
             instruction="set width to 30 inches",
             dimensions=base_dims,
             assembly_context="ASSEMBLY CONTEXT",
+            dim_axis_labels=BASE_AXIS_LABELS,
             model_path=None,
         ))
     assert result.error is None
@@ -169,6 +149,7 @@ async def test_classification_height_only(base_dims):
             instruction="set height to 1.5m",
             dimensions=base_dims,
             assembly_context="ASSEMBLY CONTEXT",
+            dim_axis_labels=BASE_AXIS_LABELS,
             model_path=None,
         ))
     assert result.error is None
@@ -184,10 +165,51 @@ async def test_classification_malformed_json_returns_error(base_dims):
             instruction="set width to 30 inches",
             dimensions=base_dims,
             assembly_context="ASSEMBLY CONTEXT",
+            dim_axis_labels=BASE_AXIS_LABELS,
             model_path=None,
         ))
     assert result.error is not None
     assert "invalid JSON" in result.error
+
+
+@pytest.mark.asyncio
+async def test_classification_single_scope(base_dims):
+    llm_json = json.dumps({
+        "changes": [{"dimension": "WIDTH@Mirror", "value_meters": 0.762}],
+        "explanation": "Changing only mirror glass width",
+    })
+    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+        result = await interpret(InterpretRequest(
+            instruction="change mirror glass width to 30 inches",
+            dimensions=base_dims,
+            dim_axis_labels=BASE_AXIS_LABELS,
+            model_path=None,
+        ))
+    assert result.error is None
+    assert len(result.changes) == 1
+    assert result.changes[0].name == "WIDTH@Mirror"
+    assert result.changes[0].value_meters == pytest.approx(0.762)
+
+
+@pytest.mark.asyncio
+async def test_classification_uses_request_master_when_llm_omits_it(base_dims):
+    llm_json = json.dumps({
+        "target_width_meters": 0.762,
+        "width_dims": ["WIDTH@Mirror", "LED_WIDTH@LED"],
+        "target_height_meters": None,
+        "height_dims": [],
+        "explanation": "Overall resize",
+    })
+    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+        result = await interpret(InterpretRequest(
+            instruction="set width to 30 inches",
+            dimensions=base_dims,
+            dim_axis_labels=BASE_AXIS_LABELS,
+            master_width_dim="WIDTH@Mirror",
+            model_path=None,
+        ))
+    assert result.error is None
+    assert any(c.name == "WIDTH@Mirror" for c in result.changes)
 
 
 # ── Case 3: no context ────────────────────────────────────────────────────────

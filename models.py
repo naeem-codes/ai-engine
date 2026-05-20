@@ -12,6 +12,9 @@ class InterpretRequest(BaseModel):
     dimensions: list[DimensionIn] = []
     assembly_context: str | None = None
     model_path: str | None = None
+    dim_axis_labels: dict[str, str] = {}
+    master_width_dim: str | None = None
+    master_height_dim: str | None = None
 
 
 class DimensionChange(BaseModel):
