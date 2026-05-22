@@ -1,5 +1,6 @@
 import os
 import httpx
+from log import log, section
 
 
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
@@ -54,6 +55,19 @@ async def call_openai(system_prompt: str, user_message: str, max_tokens: int = 2
 
 async def call_llm(system_prompt: str, user_message: str, max_tokens: int = 256) -> str:
     provider = os.environ.get("DEFAULT_PROVIDER", "claude").lower()
+    model = OPENAI_MODEL if provider == "openai" else CLAUDE_MODEL
+
+    section(f"LLM CALL  provider={provider}  model={model}  max_tokens={max_tokens}")
+    log(f"[SYSTEM PROMPT] ({len(system_prompt)} chars)")
+    log(system_prompt)
+    log(f"[USER MESSAGE]")
+    log(user_message)
+
     if provider == "openai":
-        return await call_openai(system_prompt, user_message, max_tokens)
-    return await call_claude(system_prompt, user_message, max_tokens)
+        raw = await call_openai(system_prompt, user_message, max_tokens)
+    else:
+        raw = await call_claude(system_prompt, user_message, max_tokens)
+
+    log(f"[LLM RESPONSE] ({len(raw)} chars)")
+    log(raw)
+    return raw

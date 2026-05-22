@@ -31,7 +31,7 @@ def classification_prompt(
     mw = master_width_dim or "null"
     mh = master_height_dim or "null"
     context_block = (
-        f"\n-- ASSEMBLY CONTEXT --\n{assembly_context}\n---------------------\n"
+        f"\n-- ASSEMBLY CONTEXT (includes COMPONENT RELATIONSHIP MAP) --------------------\n{assembly_context}\n------------------------------------------------------------------------------\n"
         if assembly_context
         else ""
     )
@@ -46,47 +46,36 @@ The user wants to resize the assembly. You must:
 You must NOT calculate or guess new dimension values. Only return names and targets.
 
 -- SCOPE RULES ---------------------------------------------------------------
-  SCOPE = OVERALL (default)
+  SCOPE = OVERALL  (default when no specific component is named)
     -> User mentions no specific component name
-    -> Example: "change width to 80 inches", "resize to 24x48"
-    -> Return: width_dims, height_dims, target sizes
+    -> Example: "change width to 80 inches", "resize to 24x48", "make it 30 inches tall"
+    -> Return: width_dims, height_dims, target sizes — ALL [W]/[H] dims scale together
 
-  SCOPE = SINGLE
-    -> User mentions a specific component but no others
-    -> Example: "change chassis width to 60 inches", "only resize the mirror glass"
+  SCOPE = SINGLE  (only when user explicitly restricts to one component)
+    -> User says ONLY or JUST before a component name, or specifies an exact dimension name
+    -> Example: "ONLY the chassis width", "just resize the mirror glass", "set D1@Sketch1"
     -> Return: direct changes array with exact dimension name and value in meters
 
-  SCOPE = DEPENDENT
-    -> User mentions a component AND words like "related", "corresponding", "dependent"
-    -> Example: "change chassis width and its corresponding components"
-    -> Use the 3-step process below with ASSEMBLY CONTEXT to find all dependent dims
-    -> Return: width_dims, height_dims, target sizes for all affected components
+  SCOPE = CONNECTED  (default when a component IS named, without ONLY/JUST)
+    -> User names a specific component but does NOT say ONLY or JUST
+    -> Example: "increase the chassis width", "make the mirror wider", "resize the LED strip"
+    -> MANDATORY: Look at the COMPONENT RELATIONSHIP MAP in the ASSEMBLY CONTEXT below
+    -> Perform a FULL transitive traversal — not just 1 hop:
+         Step 1: Find all components directly mated to the named component (1 hop)
+         Step 2: For each of those, find THEIR mates (2 hops)
+         Step 3: Continue until no new components are added (full connected subgraph)
+    -> Include [W]/[H] dims for EVERY component reached in this traversal
+    -> This is model-agnostic: it works for any assembly where parts are physically linked
+       through a chain of mates (e.g. partA → bracket → frame → strip → clip)
+    -> Return: width_dims and/or height_dims covering the full connected component set
 {context_block}
--- DEPENDENT SCOPE: 3-STEP DEPENDENCY IDENTIFICATION ------------------------
-(Only apply when SCOPE = DEPENDENT)
-
-STEP 1 — Use POSITION to classify each component:
-  - Component Position X is large (|X| > 50 mm) → sits left/right → WIDTH-dependent
-  - Component Position Y is large (|Y| > 50 mm) → sits top/bottom → HEIGHT-dependent
-  - Component at X≈0, Y≈0 → centered, check its dimension names for clues
-
-STEP 2 — Use MATES to extend classification:
-  - If component A is mated to component B and B is already WIDTH-dependent,
-    then A is also WIDTH-dependent (same for HEIGHT)
-  - Follow the mate chain: A→B→C means if B is width-dependent, so is C
-
-STEP 3 — Use SKETCH RELATIONS to confirm:
-  - Equal/Symmetric relations between dims confirm they scale together
-  - Midpoint relations indicate a centered dim — likely master or dependent
------------------------------------------------------------------------------
-
 -- HOW TO IDENTIFY DIMENSIONS ------------------------------------------------
 Each dimension below is pre-labeled by the application — trust these labels:
-  [W] = controls width  — include in width_dims
-  [H] = controls height — include in height_dims
+  [W] = controls width  — include in width_dims when width is changing
+  [H] = controls height — include in height_dims when height is changing
   [?] = internal/fixed  — DO NOT include in either list
 
-Master dims (pre-identified by app — do NOT return in JSON for OVERALL scope):
+Master dims (pre-identified by app):
   - master_width_dim  = {mw}
   - master_height_dim = {mh}
 
@@ -103,14 +92,14 @@ For OVERALL scope:
 - "height_dims"          : array of [H] dimension names to scale
 - "explanation"          : one sentence describing what is being changed
 
-For DEPENDENT scope:
+For CONNECTED scope:
 - "target_width_meters"  : new width in meters, or null if not changing
-- "master_width_dim"     : the target component's primary [W] dimension name, or null
-- "width_dims"           : array of [W] dimension names to scale
+- "master_width_dim"     : the named component's primary [W] dimension name, or null
+- "width_dims"           : [W] dims for named component + ALL mated components
 - "target_height_meters" : new height in meters, or null if not changing
-- "master_height_dim"    : the target component's primary [H] dimension name, or null
-- "height_dims"          : array of [H] dimension names to scale
-- "explanation"          : one sentence describing what is being changed
+- "master_height_dim"    : the named component's primary [H] dimension name, or null
+- "height_dims"          : [H] dims for named component + ALL mated components
+- "explanation"          : one sentence naming which components are being resized
 
 For SINGLE scope:
 - "changes"     : [{{"dimension": "exact name from list", "value_meters": 0.0}}]
@@ -121,5 +110,6 @@ Rules:
 - Return names WITHOUT the [W]/[H]/[?] prefix
 - ONLY include [W] dims in width_dims — never [H] or [?]
 - ONLY include [H] dims in height_dims — never [W] or [?]
+- CONNECTED scope: always check the COMPONENT RELATIONSHIP MAP and include mated components
 - If instruction is unclear: {{"error": "what is unclear"}}
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m"""

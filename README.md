@@ -121,7 +121,10 @@ The engine applies three cases in order:
 
 1. **Rules-based** — if a `.rules.json` file exists for the active model (`model_path` stem matched against `rules/`), the LLM identifies the trigger keyword and value, the engine validates size limits and expands the trigger into all dependent dimensions using predefined ratios.
 
-2. **Classification** — if no rules file exists but `assembly_context` is provided, the LLM classifies which dimensions belong to each axis (width/height), and the engine calculates new values using the current dimension ratios.
+2. **Classification** — if no rules file exists but `assembly_context` is provided, the LLM classifies which dimensions belong to each axis (width/height) and determines the resize scope:
+   - **OVERALL** — no component named → all `[W]`/`[H]` dims scale proportionally
+   - **CONNECTED** — a component is named (without ONLY/JUST) → the LLM looks up that component in the **COMPONENT RELATIONSHIP MAP** embedded in `assembly_context` and includes all directly-mated components' dimensions in the change set. This is how physically connected parts (e.g. mirror glass + chassis frame + LED strips) all resize correctly when any one of them is mentioned.
+   - **SINGLE** — user says ONLY/JUST → only that component changes
 
 3. **Error fallback** — if neither rules nor context are available, an error is returned asking the user to refresh dimensions first.
 

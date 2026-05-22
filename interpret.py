@@ -3,12 +3,12 @@ from models import InterpretRequest, DimensionChange, InterpretResponse
 from rules import load_rules, get_triggers, validate, expand
 from llm import call_llm
 from prompts import rules_prompt, classification_prompt
+from log import log, section
 
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
-        # Skip past the opening fence line (e.g. "```json\n" or "```\n")
         nl = text.find("\n")
         text = text[nl + 1:] if nl != -1 else text[3:]
     if text.endswith("```"):
@@ -17,18 +17,40 @@ def _strip_fences(text: str) -> str:
 
 
 async def interpret(req: InterpretRequest) -> InterpretResponse:
+    # ── Log incoming request ──────────────────────────────────────────────────
+    section(f"INTERPRET REQUEST")
+    log(f"  instruction       : {req.instruction}")
+    log(f"  model_path        : {req.model_path or '(none)'}")
+    log(f"  dimensions        : {len(req.dimensions)} total")
+    log(f"  dim_axis_labels   : {len(req.dim_axis_labels)} entries")
+    log(f"  master_width_dim  : {req.master_width_dim or 'null'}")
+    log(f"  master_height_dim : {req.master_height_dim or 'null'}")
+    log(f"  assembly_context  : {len(req.assembly_context or '')} chars")
+    if req.dimensions:
+        log("  [W] dims: " + ", ".join(
+            d.name for d in req.dimensions
+            if req.dim_axis_labels.get(d.name) == "W"
+        ) or "  [W] dims: none")
+        log("  [H] dims: " + ", ".join(
+            d.name for d in req.dimensions
+            if req.dim_axis_labels.get(d.name) == "H"
+        ) or "  [H] dims: none")
+
     model_rules = load_rules(req.model_path)
 
+    # ── Case 1: rules file ────────────────────────────────────────────────────
     if model_rules is not None:
-        # Case 1: rules-based — AI identifies trigger + value, we expand
         triggers = get_triggers(model_rules)
+        log(f"  CASE 1 (rules)  triggers={triggers}")
         raw = await call_llm(rules_prompt(triggers), req.instruction, max_tokens=256)
         try:
             data = json.loads(_strip_fences(raw))
         except json.JSONDecodeError as exc:
+            log(f"  ERROR: LLM returned invalid JSON: {exc}")
             return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
 
         if "error" in data:
+            log(f"  ERROR (from AI): {data['error']}")
             return InterpretResponse(error=data["error"])
 
         if "changes" in data:
@@ -38,16 +60,21 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 if c.get("value_meters", 0) > 0
             ]
             if not changes:
+                log("  ERROR: AI returned empty changes list")
                 return InterpretResponse(error="AI returned an empty changes list")
+            _log_changes("CASE 1 direct changes", changes)
             return InterpretResponse(changes=changes, explanation=data.get("explanation"))
 
         trigger = data.get("trigger", "")
         value_meters = float(data.get("value_meters", 0))
+        log(f"  trigger={trigger!r}  value_meters={value_meters}")
         if not trigger or value_meters <= 0:
+            log("  ERROR: AI returned invalid trigger response")
             return InterpretResponse(error="AI returned invalid trigger response")
 
         limit_error = validate(model_rules, trigger, value_meters)
         if limit_error:
+            log(f"  ERROR (validation): {limit_error}")
             return InterpretResponse(error=limit_error)
 
         expanded = expand(model_rules, trigger, value_meters)
@@ -55,10 +82,11 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         explanation = data.get("explanation") or (
             f"Applying {trigger} = {value_meters * 1000:.2f} mm via smart rules ({len(changes)} dimensions)"
         )
+        _log_changes("CASE 1 expanded changes", changes)
         return InterpretResponse(changes=changes, explanation=explanation)
 
+    # ── Case 2: classification ────────────────────────────────────────────────
     if req.dim_axis_labels:
-        # Case 2: classification — AI classifies dims by axis, we calculate ratios
         large_dims = [d for d in req.dimensions if d.value_meters >= 0.05]
         dim_list = "\n".join(
             f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
@@ -70,6 +98,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             kw in req.instruction.lower() for kw in _dependent_keywords
         )
         context_for_prompt = req.assembly_context if is_dependent else None
+
+        log(f"  CASE 2 (classification)  large_dims={len(large_dims)}  context_in_prompt={'yes' if context_for_prompt else 'no (OVERALL/SINGLE scope)'}")
+        log(f"  dim_list sent to prompt:\n{dim_list}")
 
         raw = await call_llm(
             classification_prompt(
@@ -84,12 +115,14 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         try:
             data = json.loads(_strip_fences(raw))
         except json.JSONDecodeError as exc:
+            log(f"  ERROR: LLM returned invalid JSON: {exc}")
             return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
 
         if "error" in data:
+            log(f"  ERROR (from AI): {data['error']}")
             return InterpretResponse(error=data["error"])
 
-        # SINGLE scope: AI returned direct changes with "dimension" key
+        # SINGLE scope
         if "changes" in data:
             changes = [
                 DimensionChange(name=c["dimension"], value_meters=c["value_meters"])
@@ -97,10 +130,12 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 if c.get("value_meters", 0) > 0
             ]
             if not changes:
+                log("  ERROR: AI returned empty changes list (SINGLE scope)")
                 return InterpretResponse(error="AI returned an empty changes list")
+            _log_changes("CASE 2 SINGLE scope changes", changes)
             return InterpretResponse(changes=changes, explanation=data.get("explanation"))
 
-        # OVERALL / DEPENDENT scope: ratio-based scaling
+        # OVERALL / CONNECTED scope: ratio-based scaling
         dims_by_name = {d.name: d.value_meters for d in req.dimensions}
         changes: list[DimensionChange] = []
         axis_errors: list[str] = []
@@ -108,6 +143,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         target_w = data.get("target_width_meters")
         master_w = data.get("master_width_dim") or req.master_width_dim
         width_dims: list[str] = data.get("width_dims") or []
+        log(f"  target_w={target_w}  master_w={master_w!r}  width_dims={width_dims}")
         if target_w and master_w and width_dims:
             master_current = dims_by_name.get(master_w, 0.0)
             if master_current <= 0:
@@ -116,12 +152,16 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 for dname in width_dims:
                     current = dims_by_name.get(dname)
                     if current is None:
+                        log(f"    [W] SKIP {dname!r} — not in dims")
                         continue
-                    changes.append(DimensionChange(name=dname, value_meters=(current / master_current) * target_w))
+                    new_val = (current / master_current) * target_w
+                    log(f"    [W] {dname}  {current * 1000:.2f} mm  →  {new_val * 1000:.2f} mm")
+                    changes.append(DimensionChange(name=dname, value_meters=new_val))
 
         target_h = data.get("target_height_meters")
         master_h = data.get("master_height_dim") or req.master_height_dim
         height_dims: list[str] = data.get("height_dims") or []
+        log(f"  target_h={target_h}  master_h={master_h!r}  height_dims={height_dims}")
         if target_h and master_h and height_dims:
             master_current = dims_by_name.get(master_h, 0.0)
             if master_current <= 0:
@@ -130,14 +170,26 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 for dname in height_dims:
                     current = dims_by_name.get(dname)
                     if current is None:
+                        log(f"    [H] SKIP {dname!r} — not in dims")
                         continue
-                    changes.append(DimensionChange(name=dname, value_meters=(current / master_current) * target_h))
+                    new_val = (current / master_current) * target_h
+                    log(f"    [H] {dname}  {current * 1000:.2f} mm  →  {new_val * 1000:.2f} mm")
+                    changes.append(DimensionChange(name=dname, value_meters=new_val))
 
         if not changes:
             error_msg = "; ".join(axis_errors) if axis_errors else "AI classified no dimensions — check assembly context"
+            log(f"  ERROR: {error_msg}")
             return InterpretResponse(error=error_msg)
 
+        _log_changes("CASE 2 OVERALL/CONNECTED final changes", changes)
         return InterpretResponse(changes=changes, explanation=data.get("explanation"))
 
-    # Case 3: no rules, no context
+    # ── Case 3: no rules, no context ─────────────────────────────────────────
+    log("  CASE 3 (no rules, no context) — returning error")
     return InterpretResponse(error="Assembly context not loaded. Please click Refresh Dimensions first.")
+
+
+def _log_changes(label: str, changes: list[DimensionChange]) -> None:
+    log(f"  [{label}]  {len(changes)} change(s):")
+    for c in changes:
+        log(f"    {c.name:<55} →  {c.value_meters * 1000:>8.2f} mm  ({c.value_meters / 0.0254:>8.3f} in)")
