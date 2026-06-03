@@ -36,7 +36,7 @@ nano .env                          # Add your ANTHROPIC_API_KEY
 
 ```bash
 source .venv/bin/activate
-python -m uvicorn main:app --reload --reload-exclude '.git' --port 8000
+python -m uvicorn main:app --port 8000
 ```
 
 > Always use `python -m uvicorn` (not just `uvicorn`) to ensure the venv's packages are used, not the system ones.

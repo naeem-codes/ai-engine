@@ -1,25 +1,27 @@
-def rules_prompt(triggers: list[str]) -> str:
-    t = ", ".join(triggers)
-    return f"""You are a SolidWorks CAD dimension assistant.
-The engineer will describe a resize operation on the open CAD model.
+def rules_dependent_prompt(rules_json: str) -> str:
+    return f"""You are a SolidWorks CAD resize assistant.
 
-This model has smart rules defined for these triggers: {t}
+These are the resize rules defined for this assembly:
+{rules_json}
 
-RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences, no explanation outside the JSON.
+The user will describe a resize in natural language referencing a component or dimension.
+Find the ONE rule from the list above that best matches what the user wants to change, and extract the target size.
 
-If the user mentions a trigger keyword ({t}):
-{{"trigger": "width", "value_meters": 0.762, "explanation": "Setting width to 30 inches"}}
+RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
 
-If the user specifies an exact dimension name (contains @ symbol):
-{{"changes": [{{"dimension": "ExactName@Feature [Component]", "value_meters": 0.5}}], "explanation": "Direct dimension change"}}
+{{
+  "rule": {{
+    "if_changes": "exact dim name from rules",
+    "also_change": ["exact dim name", "..."]
+  }},
+  "value_meters": 1.0668,
+  "explanation": "one sentence"
+}}
 
-If the instruction is ambiguous:
-{{"error": "Brief explanation of what is unclear"}}
-
-Rules:
-- trigger must exactly match one of: {t}
+- Copy if_changes and also_change EXACTLY from the rules JSON above
 - value_meters must be a positive number in meters
-- 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m"""
+- 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m
+- If unclear: {{"error": "what is unclear"}}"""
 
 
 def classification_prompt(
@@ -113,3 +115,90 @@ Rules:
 - CONNECTED scope: always check the COMPONENT RELATIONSHIP MAP and include mated components
 - If instruction is unclear: {{"error": "what is unclear"}}
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m"""
+
+
+def rules_system_prompt(
+    assembly_context: str,
+    dim_list: str,
+    master_width_dim: str | None = None,
+    master_height_dim: str | None = None,
+) -> str:
+    mw = master_width_dim or "null"
+    mh = master_height_dim or "null"
+    return f"""You are a SolidWorks resize rules generator.
+
+The dimension list below is already labeled by the app — trust these labels:
+  [W] = controls width
+  [H] = controls height
+  [?] = internal/fixed — ignore completely
+
+Your ONLY job:
+  - Look at [W] dims — figure out which ones change together
+  - Look at [H] dims — figure out which ones change together
+  - Identify which dims should NOT change at all
+
+-- ASSEMBLY CONTEXT ----------------------------------------------------------
+{assembly_context}
+-----------------------------------------------------------------------------
+
+-- HOW TO IDENTIFY DIMENSIONS ------------------------------------------------
+Each dimension below is pre-labeled by the application — trust these labels:
+  [W] = controls width
+  [H] = controls height
+  [?] = internal/fixed — DO NOT include in any rule
+
+Master dims (already identified by app):
+  - master_width_dim  = {mw}
+  - master_height_dim = {mh}
+
+-- DIMENSIONS (>= 50 mm) -----------------------------------------------------
+{dim_list}
+-----------------------------------------------------------------------------
+
+-- STEP 1: USE POSITION to classify each component ---------------------------
+  - Component Position X is large (|X| > 50 mm) → sits left/right → WIDTH-dependent
+  - Component Position Y is large (|Y| > 50 mm) → sits top/bottom → HEIGHT-dependent
+  - Component at X≈0, Y≈0 → centered → check its dimension names for clues
+
+-- STEP 2: USE MATES to extend classification --------------------------------
+  - If component A is mated to component B and B is already WIDTH-dependent,
+    then A is also WIDTH-dependent (same for HEIGHT)
+  - Follow the mate chain: A→B→C means if B is width-dependent, so is C
+
+-- STEP 3: USE SKETCH RELATIONS to confirm -----------------------------------
+  - Equal/Symmetric relations between dims confirm they scale together
+  - Midpoint relations indicate a centered dim — likely master or dependent
+
+-- STEP 4: BUILD also_change WITH CROSS-COMPONENT DIMS -----------------------
+  For each if_changes dim, also_change must include the matching axis dims
+  from ALL other components that are physically connected via mates.
+  Do NOT limit also_change to dims from the same component as if_changes.
+
+-- STRICT RULES ---------------------------------------------------------------
+  - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] dim
+  - height_rules must ONLY contain [H] labeled dims — NEVER include any [W] dim
+  - NEVER include the if_changes dim inside its own also_change list
+  - NEVER repeat the same dim twice in also_change
+
+RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
+
+{{
+  "width_rules": [
+    {{
+      "if_changes": "exact [W] dim name from the list",
+      "also_change": ["exact [W] dim name", "..."]
+    }}
+  ],
+  "height_rules": [
+    {{
+      "if_changes": "exact [H] dim name from the list",
+      "also_change": ["exact [H] dim name", "..."]
+    }}
+  ],
+  "skip": [
+    {{"name": "exact dim name", "reason": "why skipped"}}
+  ],
+  "component_labels": {{
+    "exact-component-id": "Human Readable Name"
+  }}
+}}"""
