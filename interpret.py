@@ -45,52 +45,51 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             for d in large_dims
         ) or "  (no dimensions >= 50 mm found)"
 
+        # Rules file exists → always use rules_dependent_prompt, ignore keywords
+        model_rules = load_rules(req.model_path)
+        if model_rules is not None:
+            rules_json = json.dumps({
+                "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
+                "height": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.height],
+            }, indent=2)
+            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars")
+            raw = await call_llm(rules_dependent_prompt(rules_json), req.instruction, max_tokens=512)
+            try:
+                data = json.loads(_strip_fences(raw))
+            except json.JSONDecodeError as exc:
+                return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
+            if "error" in data:
+                return InterpretResponse(error=data["error"])
+
+            rule_data = data.get("rule", {})
+            if_changes = rule_data.get("if_changes", "")
+            also_change = rule_data.get("also_change", [])
+            value_meters = float(data.get("value_meters", 0))
+            log(f"  if_changes={if_changes!r}  value_meters={value_meters}")
+
+            if not if_changes or value_meters <= 0:
+                return InterpretResponse(error="AI returned invalid rule response")
+
+            current_dims = {d.name: d.value_meters for d in req.dimensions}
+            master_current = current_dims.get(if_changes, 0.0)
+            changes = [DimensionChange(name=if_changes, value_meters=value_meters)]
+            for dep in also_change:
+                if dep == if_changes:
+                    continue
+                current = current_dims.get(dep)
+                if current is None:
+                    log(f"    SKIP {dep!r} — not in dims")
+                    continue
+                new_val = (current / master_current) * value_meters if master_current > 0 else value_meters
+                changes.append(DimensionChange(name=dep, value_meters=new_val))
+
+            explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
+            _log_changes("CASE 2 rules changes", changes)
+            return InterpretResponse(changes=changes, explanation=explanation)
+
+        # No rules file → use keywords to decide context
         _dependent_keywords = ("related", "corresponding", "dependent", "and everything", "dependencies")
         is_dependent = any(kw in req.instruction.lower() for kw in _dependent_keywords)
-
-        # Dependent + rules exist → use rules JSON, skip assembly context
-        if is_dependent:
-            model_rules = load_rules(req.model_path)
-            if model_rules is not None:
-                rules_json = json.dumps({
-                    "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
-                    "height": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.height],
-                }, indent=2)
-                log(f"  CASE 2 (dependent + rules)  rules_json={len(rules_json)} chars")
-                raw = await call_llm(rules_dependent_prompt(rules_json), req.instruction, max_tokens=512)
-                try:
-                    data = json.loads(_strip_fences(raw))
-                except json.JSONDecodeError as exc:
-                    return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
-                if "error" in data:
-                    return InterpretResponse(error=data["error"])
-
-                rule_data = data.get("rule", {})
-                if_changes = rule_data.get("if_changes", "")
-                also_change = rule_data.get("also_change", [])
-                value_meters = float(data.get("value_meters", 0))
-                log(f"  if_changes={if_changes!r}  value_meters={value_meters}")
-
-                if not if_changes or value_meters <= 0:
-                    return InterpretResponse(error="AI returned invalid rule response")
-
-                current_dims = {d.name: d.value_meters for d in req.dimensions}
-                master_current = current_dims.get(if_changes, 0.0)
-                changes = [DimensionChange(name=if_changes, value_meters=value_meters)]
-                for dep in also_change:
-                    if dep == if_changes:
-                        continue
-                    current = current_dims.get(dep)
-                    if current is None:
-                        log(f"    SKIP {dep!r} — not in dims")
-                        continue
-                    new_val = (current / master_current) * value_meters if master_current > 0 else value_meters
-                    changes.append(DimensionChange(name=dep, value_meters=new_val))
-
-                explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
-                _log_changes("CASE 2 dependent+rules changes", changes)
-                return InterpretResponse(changes=changes, explanation=explanation)
-
         context_for_prompt = req.assembly_context if is_dependent else None
 
         log(f"  CASE 2 (classification)  large_dims={len(large_dims)}  context_in_prompt={'yes' if context_for_prompt else 'no (OVERALL/SINGLE scope)'}")
