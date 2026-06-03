@@ -62,3 +62,4 @@ class SaveRulesRequest(BaseModel):
     model_path: str
     width: list[RulePair] = []
     height: list[RulePair] = []
+    component_labels: dict[str, str] = {}

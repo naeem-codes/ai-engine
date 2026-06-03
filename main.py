@@ -28,6 +28,23 @@ async def generate_rules_endpoint(req: GenerateRulesRequest) -> GenerateRulesRes
     return await run_generate_rules(req)
 
 
+@app.get("/get-rules", response_model=GenerateRulesResponse)
+async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
+    from models import RulePair
+    stem = Path(model_path).stem
+    candidate = RULES_DIR / f"{stem}.rules.json"
+    if not candidate.exists():
+        return GenerateRulesResponse()
+    data = json.loads(candidate.read_text())
+    def parse(lst):
+        return [RulePair(if_changes=r["if_changes"], also_change=r.get("also_change", [])) for r in lst if r.get("if_changes")]
+    return GenerateRulesResponse(
+        width_rules=parse(data.get("width", [])),
+        height_rules=parse(data.get("height", [])),
+        component_labels=data.get("component_labels", {}),
+    )
+
+
 @app.post("/save-rules")
 async def save_rules_endpoint(req: SaveRulesRequest):
     stem = Path(req.model_path).stem
@@ -37,6 +54,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         "model": stem,
         "width": [{"if_changes": r.if_changes, "also_change": r.also_change} for r in req.width],
         "height": [{"if_changes": r.if_changes, "also_change": r.also_change} for r in req.height],
+        "component_labels": req.component_labels,
     }
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}
