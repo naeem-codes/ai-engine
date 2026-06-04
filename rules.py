@@ -73,19 +73,19 @@ def get_triggers(model_rules: ModelRules) -> list[str]:
     return triggers
 
 
-def validate(model_rules: ModelRules, trigger: str, value_meters: float) -> str | None:
+def validate(model_rules: ModelRules, trigger: str, value_meters: float, check_min: bool = True) -> str | None:
     if model_rules.limits is None:
         return None
     mm = value_meters * 1000
     L = model_rules.limits
     t = trigger.lower()
     if t == "width":
-        if mm < L.min_width_mm:
+        if check_min and mm < L.min_width_mm:
             return f"Width {mm:.0f}mm ({mm/25.4:.2f}in) is below minimum {L.min_width_mm:.0f}mm ({L.min_width_mm/25.4:.2f}in)"
         if mm > L.max_width_mm:
             return f"Width {mm:.0f}mm ({mm/25.4:.2f}in) exceeds maximum {L.max_width_mm:.0f}mm ({L.max_width_mm/25.4:.2f}in)"
     elif t == "height":
-        if mm < L.min_height_mm:
+        if check_min and mm < L.min_height_mm:
             return f"Height {mm:.0f}mm ({mm/25.4:.2f}in) is below minimum {L.min_height_mm:.0f}mm ({L.min_height_mm/25.4:.2f}in)"
         if mm > L.max_height_mm:
             return f"Height {mm:.0f}mm ({mm/25.4:.2f}in) exceeds maximum {L.max_height_mm:.0f}mm ({L.max_height_mm/25.4:.2f}in)"

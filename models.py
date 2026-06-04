@@ -54,6 +54,7 @@ class GenerateRulesResponse(BaseModel):
     height_rules: list[RulePair] = []
     skip: list[SkipEntry] = []
     component_labels: dict[str, str] = {}
+    limits: dict[str, float] = {}
     error: str | None = None
 
 
@@ -63,3 +64,4 @@ class SaveRulesRequest(BaseModel):
     width: list[RulePair] = []
     height: list[RulePair] = []
     component_labels: dict[str, str] = {}
+    limits: dict[str, float] = {}

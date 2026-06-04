@@ -1,6 +1,6 @@
 import json
 from models import InterpretRequest, DimensionChange, InterpretResponse
-from rules import load_rules
+from rules import load_rules, validate
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -69,6 +69,12 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
             if not if_changes or value_meters <= 0:
                 return InterpretResponse(error="AI returned invalid rule response")
+
+            # Validate against limits — skip min check if rule has no dependencies
+            trigger = "width" if any(r.if_changes == if_changes for r in model_rules.width) else "height"
+            limit_error = validate(model_rules, trigger, value_meters, check_min=bool(also_change))
+            if limit_error:
+                return InterpretResponse(error=limit_error)
 
             current_dims = {d.name: d.value_meters for d in req.dimensions}
             master_current = current_dims.get(if_changes, 0.0)

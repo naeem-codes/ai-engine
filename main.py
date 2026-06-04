@@ -42,6 +42,7 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         width_rules=parse(data.get("width", [])),
         height_rules=parse(data.get("height", [])),
         component_labels=data.get("component_labels", {}),
+        limits=data.get("limits", {}),
     )
 
 
@@ -56,5 +57,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         "height": [{"if_changes": r.if_changes, "also_change": r.also_change} for r in req.height],
         "component_labels": req.component_labels,
     }
+    if req.limits:
+        doc["limits"] = req.limits
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}
