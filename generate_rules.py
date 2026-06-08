@@ -21,7 +21,12 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     log(f"  master_width_dim  : {req.master_width_dim or 'null'}")
     log(f"  master_height_dim : {req.master_height_dim or 'null'}")
 
-    large_dims = [d for d in req.dimensions if d.value_meters >= 0.05]
+    # Keep dims >= 50 mm (noise filter for unclassified dims), but ALWAYS keep
+    # dims the app already labeled [W]/[H] — they are axis drivers regardless of
+    # size (e.g. a 12.7 mm LED-strip width). Generic: no model-specific names.
+    def _keep(d):
+        return d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H")
+    large_dims = [d for d in req.dimensions if _keep(d)]
     dim_list = "\n".join(
         f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
         for d in large_dims

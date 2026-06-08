@@ -39,7 +39,12 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
     # ── Case 2: classification ────────────────────────────────────────────────
     if req.dim_axis_labels:
-        large_dims = [d for d in req.dimensions if d.value_meters >= 0.05]
+        # >= 50 mm noise filter, but always keep app-labeled [W]/[H] axis drivers
+        # (e.g. a small LED-strip width). Generic — no model-specific names.
+        large_dims = [
+            d for d in req.dimensions
+            if d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H")
+        ]
         dim_list = "\n".join(
             f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
             for d in large_dims
