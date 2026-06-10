@@ -43,6 +43,7 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         height_rules=parse(data.get("height", [])),
         component_labels=data.get("component_labels", {}),
         limits=data.get("limits", {}),
+        pattern_rules=data.get("pattern_rules", []),
     )
 
 
@@ -51,6 +52,16 @@ async def save_rules_endpoint(req: SaveRulesRequest):
     stem = Path(req.model_path).stem
     RULES_DIR.mkdir(exist_ok=True)
     out_path = RULES_DIR / f"{stem}.rules.json"
+
+    # Preserve pattern_rules across saves: the rules form doesn't edit them, so
+    # if the request omits them, keep whatever is already on disk.
+    pattern_rules = req.pattern_rules
+    if not pattern_rules and out_path.exists():
+        try:
+            pattern_rules = json.loads(out_path.read_text()).get("pattern_rules", [])
+        except (json.JSONDecodeError, OSError):
+            pattern_rules = []
+
     doc = {
         "model": stem,
         "width": [{"if_changes": r.if_changes, "also_change": r.also_change} for r in req.width],
@@ -59,5 +70,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
     }
     if req.limits:
         doc["limits"] = req.limits
+    if pattern_rules:
+        doc["pattern_rules"] = pattern_rules
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}

@@ -55,6 +55,10 @@ class GenerateRulesResponse(BaseModel):
     skip: list[SkipEntry] = []
     component_labels: dict[str, str] = {}
     limits: dict[str, float] = {}
+    # Component-multiplication rules (e.g. LED strips that scale in count with size).
+    # Kept as free-form dicts so the .NET app owns the schema; the engine only stores
+    # and forwards them — it never applies them (component ops happen in SolidWorks).
+    pattern_rules: list[dict] = []
     error: str | None = None
 
 
@@ -65,3 +69,4 @@ class SaveRulesRequest(BaseModel):
     height: list[RulePair] = []
     component_labels: dict[str, str] = {}
     limits: dict[str, float] = {}
+    pattern_rules: list[dict] = []
