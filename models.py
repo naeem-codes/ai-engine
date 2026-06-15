@@ -44,6 +44,16 @@ class RulePair(BaseModel):
     also_change: list[str] = []
 
 
+class PositionRule(BaseModel):
+    """A distance-mate offset that follows a moving edge on resize."""
+    component: str = ""
+    position_dim: str = ""
+    driver_dim: str = ""
+    axis: str = "width"
+    factor: float = 0.5
+    note: str = ""
+
+
 class SkipEntry(BaseModel):
     name: str
     reason: str
@@ -59,6 +69,7 @@ class GenerateRulesResponse(BaseModel):
     # Kept as free-form dicts so the .NET app owns the schema; the engine only stores
     # and forwards them — it never applies them (component ops happen in SolidWorks).
     pattern_rules: list[dict] = []
+    position: list[PositionRule] = []
     error: str | None = None
 
 
@@ -70,3 +81,4 @@ class SaveRulesRequest(BaseModel):
     component_labels: dict[str, str] = {}
     limits: dict[str, float] = {}
     pattern_rules: list[dict] = []
+    position: list[PositionRule] = []

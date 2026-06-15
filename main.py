@@ -30,7 +30,7 @@ async def generate_rules_endpoint(req: GenerateRulesRequest) -> GenerateRulesRes
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)
 async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
-    from models import RulePair
+    from models import RulePair, PositionRule
     stem = Path(model_path).stem
     candidate = RULES_DIR / f"{stem}.rules.json"
     if not candidate.exists():
@@ -38,12 +38,18 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
     data = json.loads(candidate.read_text())
     def parse(lst):
         return [RulePair(if_changes=r["if_changes"], also_change=r.get("also_change", [])) for r in lst if r.get("if_changes")]
+    position = [
+        PositionRule(**{k: v for k, v in r.items() if k in PositionRule.model_fields})
+        for r in data.get("position", [])
+        if r.get("position_dim") and r.get("driver_dim")
+    ]
     return GenerateRulesResponse(
         width_rules=parse(data.get("width", [])),
         height_rules=parse(data.get("height", [])),
         component_labels=data.get("component_labels", {}),
         limits=data.get("limits", {}),
         pattern_rules=data.get("pattern_rules", []),
+        position=position,
     )
 
 
@@ -53,14 +59,21 @@ async def save_rules_endpoint(req: SaveRulesRequest):
     RULES_DIR.mkdir(exist_ok=True)
     out_path = RULES_DIR / f"{stem}.rules.json"
 
-    # Preserve pattern_rules across saves: the rules form doesn't edit them, so
-    # if the request omits them, keep whatever is already on disk.
-    pattern_rules = req.pattern_rules
-    if not pattern_rules and out_path.exists():
-        try:
-            pattern_rules = json.loads(out_path.read_text()).get("pattern_rules", [])
-        except (json.JSONDecodeError, OSError):
-            pattern_rules = []
+    # Preserve pattern_rules / position across saves if the request omits them, so a
+    # form that doesn't edit a section can't wipe it. An explicitly-sent (possibly
+    # empty) list from a form that DOES edit that section still overwrites on disk.
+    def preserve(field_value, key):
+        if field_value:
+            return [v.model_dump() if hasattr(v, "model_dump") else v for v in field_value]
+        if out_path.exists():
+            try:
+                return json.loads(out_path.read_text()).get(key, [])
+            except (json.JSONDecodeError, OSError):
+                return []
+        return []
+
+    pattern_rules = preserve(req.pattern_rules, "pattern_rules")
+    position = preserve(req.position, "position")
 
     doc = {
         "model": stem,
@@ -72,5 +85,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         doc["limits"] = req.limits
     if pattern_rules:
         doc["pattern_rules"] = pattern_rules
+    if position:
+        doc["position"] = position
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}

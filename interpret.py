@@ -1,6 +1,6 @@
 import json
 from models import InterpretRequest, DimensionChange, InterpretResponse
-from rules import load_rules, validate
+from rules import load_rules, validate, expand_positions
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -93,6 +93,20 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                     continue
                 new_val = (current / master_current) * value_meters if master_current > 0 else value_meters
                 changes.append(DimensionChange(name=dep, value_meters=new_val))
+
+            # Position rules: shift distance-mate offsets so components hold a constant
+            # gap from a moving edge. Applied AFTER proportional scaling, and override
+            # any proportional value for the same dim (a mate offset must not be scaled).
+            changes_by_name = {c.name: c.value_meters for c in changes}
+            pos_changes = expand_positions(model_rules, trigger, changes_by_name, current_dims)
+            for pos_dim, pos_val in pos_changes:
+                existing = next((c for c in changes if c.name == pos_dim), None)
+                if existing is not None:
+                    log(f"    [POS] {pos_dim} override {existing.value_meters*1000:.2f} → {pos_val*1000:.2f} mm")
+                    existing.value_meters = pos_val
+                else:
+                    log(f"    [POS] {pos_dim} = {pos_val*1000:.2f} mm (edge-follow)")
+                    changes.append(DimensionChange(name=pos_dim, value_meters=pos_val))
 
             explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
             _log_changes("CASE 2 rules changes", changes)

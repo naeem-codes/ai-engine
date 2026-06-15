@@ -21,11 +21,28 @@ class SizeLimits:
 
 
 @dataclass
+class PositionRuleEntry:
+    """Keeps a component a constant gap from a moving edge as the parent resizes.
+
+    When `driver_dim` (a width/height dim) changes, `position_dim` (a distance-mate
+    value) is shifted by `factor * (new_driver - old_driver)`. factor=0.5 holds the
+    gap constant for growth that is symmetric about the centre plane (the common case).
+    """
+    component: str = ""
+    position_dim: str = ""           # the distance-mate display dim to adjust, e.g. "D1@Distance2"
+    driver_dim: str = ""             # the width/height dim whose change drives it
+    axis: str = "width"              # "width" or "height"
+    factor: float = 0.5
+    note: str = ""
+
+
+@dataclass
 class ModelRules:
     model: str
     limits: SizeLimits | None
     width: list[RulePairEntry] = field(default_factory=list)
     height: list[RulePairEntry] = field(default_factory=list)
+    position: list[PositionRuleEntry] = field(default_factory=list)
 
 
 def load_rules(model_path: str | None) -> ModelRules | None:
@@ -56,11 +73,21 @@ def load_rules(model_path: str | None) -> ModelRules | None:
                 result.append(RulePairEntry(if_changes=ic, also_change=ac))
         return result
 
+    def parse_positions(lst):
+        known = {f.name for f in dataclasses.fields(PositionRuleEntry)}
+        result = []
+        for item in lst:
+            if not item.get("position_dim") or not item.get("driver_dim"):
+                continue
+            result.append(PositionRuleEntry(**{k: v for k, v in item.items() if k in known}))
+        return result
+
     return ModelRules(
         model=data.get("model", stem),
         limits=limits,
         width=parse_pairs(data.get("width", [])),
         height=parse_pairs(data.get("height", [])),
+        position=parse_positions(data.get("position", [])),
     )
 
 
@@ -127,3 +154,33 @@ def expand(
         result.append((name, new_val))
 
     return result
+
+
+def expand_positions(
+    model_rules: ModelRules,
+    trigger: str,
+    changes_by_name: dict[str, float],
+    current_dims: dict[str, float],
+) -> list[tuple[str, float]]:
+    """Compute distance-mate adjustments so components hold a constant gap from a moving edge.
+
+    A position rule fires only when its `driver_dim` is among the dims already being
+    changed this turn (`changes_by_name`). The new mate value is the old value shifted
+    by `factor * (new_driver - old_driver)` — NOT proportional scaling, which would
+    change the gap. Returns [(position_dim, new_value_meters), ...].
+    """
+    out: list[tuple[str, float]] = []
+    for p in model_rules.position:
+        if p.axis.lower() != trigger.lower():
+            continue
+        if p.driver_dim not in changes_by_name:
+            continue  # the driving width/height dim isn't changing this turn
+        old_driver = current_dims.get(p.driver_dim)
+        old_pos = current_dims.get(p.position_dim)
+        if old_driver is None or old_pos is None:
+            continue
+        delta = changes_by_name[p.driver_dim] - old_driver
+        if abs(delta) < 1e-9:
+            continue
+        out.append((p.position_dim, old_pos + p.factor * delta))
+    return out
