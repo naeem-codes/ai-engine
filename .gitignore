@@ -5,8 +5,14 @@
 
 # Virtual environment
 .venv/
+.venv310/
 venv/
 env/
+
+# Build output (PyInstaller)
+build/
+dist/
+dist310/
 
 # Python cache
 __pycache__/
