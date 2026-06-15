@@ -1,14 +1,23 @@
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+
+# Base dir = folder of engine.exe when frozen (PyInstaller), else this file's folder.
+# This makes .env and rules/ resolve next to the exe regardless of the working directory.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+load_dotenv(BASE_DIR / ".env")
 
 import json
-from pathlib import Path
 from fastapi import FastAPI
 from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest
 from interpret import interpret as run_interpret
 from generate_rules import generate_rules as run_generate_rules
 
-RULES_DIR = Path(__file__).parent / "rules"
+RULES_DIR = BASE_DIR / "rules"
 
 app = FastAPI(title="Lumi Design AI Engine", version="1.0.0")
 
@@ -89,3 +98,10 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         doc["position"] = position
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}
+
+
+if __name__ == "__main__":
+    import os
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="127.0.0.1", port=port)

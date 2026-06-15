@@ -1,9 +1,14 @@
 import dataclasses
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-RULES_DIR = Path(__file__).parent / "rules"
+# Resolve rules/ next to engine.exe when frozen (PyInstaller), else next to this file.
+if getattr(sys, "frozen", False):
+    RULES_DIR = Path(sys.executable).parent / "rules"
+else:
+    RULES_DIR = Path(__file__).parent / "rules"
 
 
 @dataclass
