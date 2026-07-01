@@ -1,6 +1,6 @@
 import json
 from models import InterpretRequest, DimensionChange, InterpretResponse
-from rules import load_rules, validate, expand_positions
+from rules import load_rules, validate, expand_positions, find_depth_rule
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -39,11 +39,12 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
     # ── Case 2: classification ────────────────────────────────────────────────
     if req.dim_axis_labels:
-        # >= 50 mm noise filter, but always keep app-labeled [W]/[H] axis drivers
-        # (e.g. a small LED-strip width). Generic — no model-specific names.
+        # >= 50 mm noise filter, but always keep app-labeled [W]/[H]/[D] axis drivers
+        # (a small LED-strip width, or a thin sheet-metal thickness). Generic — no
+        # model-specific names.
         large_dims = [
             d for d in req.dimensions
-            if d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H")
+            if d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H", "D")
         ]
         dim_list = "\n".join(
             f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
@@ -69,8 +70,20 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                     f"component the user means):\n{lines}\n"
                 )
 
-            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}")
-            raw = await call_llm(rules_dependent_prompt(rules_json, labels_block), req.instruction, max_tokens=512)
+            # Thickness (Z) dims the user can address by name, e.g. "make the chassis 2in thick".
+            thickness_block = ""
+            if model_rules.depth:
+                lines = "\n".join(
+                    f"  {d.label or d.dim}  =  dim {d.dim}" + (f"  (component {d.component})" if d.component else "")
+                    for d in model_rules.depth
+                )
+                thickness_block = (
+                    "\nTHICKNESS DIMENSIONS (human name ⇄ exact thickness dim — use for depth/thickness "
+                    f"requests; changing one NEVER changes another):\n{lines}\n"
+                )
+
+            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}  depth={len(model_rules.depth)}")
+            raw = await call_llm(rules_dependent_prompt(rules_json, labels_block, thickness_block), req.instruction, max_tokens=512)
             try:
                 data = json.loads(_strip_fences(raw))
             except json.JSONDecodeError as exc:
@@ -86,6 +99,17 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
             if not if_changes or value_meters <= 0:
                 return InterpretResponse(error="AI returned invalid rule response")
+
+            # Thickness (Z) change: standalone, single dim. No proportional scaling, no
+            # width/height limit check, no position expansion — thickness never cascades.
+            depth_rule = find_depth_rule(model_rules, if_changes)
+            if depth_rule is not None:
+                change = DimensionChange(name=if_changes, value_meters=value_meters)
+                explanation = data.get("explanation") or (
+                    f"Set {depth_rule.label or if_changes} to {value_meters / 0.0254:.3f} in"
+                )
+                _log_changes("CASE 2 thickness change", [change])
+                return InterpretResponse(changes=[change], explanation=explanation)
 
             # Validate against limits — skip min check if rule has no dependencies
             trigger = "width" if any(r.if_changes == if_changes for r in model_rules.width) else "height"

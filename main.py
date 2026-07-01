@@ -45,7 +45,7 @@ async def drawing_plan_endpoint(req: DrawingPlanRequest) -> DrawingPlanResponse:
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)
 async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
-    from models import RulePair, PositionRule
+    from models import RulePair, PositionRule, ThicknessRule
     stem = Path(model_path).stem
     candidate = RULES_DIR / f"{stem}.rules.json"
     if not candidate.exists():
@@ -58,6 +58,11 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         for r in data.get("position", [])
         if r.get("position_dim") and r.get("driver_dim")
     ]
+    depth = [
+        ThicknessRule(**{k: v for k, v in r.items() if k in ThicknessRule.model_fields})
+        for r in data.get("depth", [])
+        if r.get("dim")
+    ]
     return GenerateRulesResponse(
         width_rules=parse(data.get("width", [])),
         height_rules=parse(data.get("height", [])),
@@ -65,6 +70,7 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         limits=data.get("limits", {}),
         pattern_rules=data.get("pattern_rules", []),
         position=position,
+        depth=depth,
     )
 
 
@@ -89,6 +95,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
 
     pattern_rules = preserve(req.pattern_rules, "pattern_rules")
     position = preserve(req.position, "position")
+    depth = preserve(req.depth, "depth")
 
     doc = {
         "model": stem,
@@ -102,6 +109,8 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         doc["pattern_rules"] = pattern_rules
     if position:
         doc["position"] = position
+    if depth:
+        doc["depth"] = depth
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}
 

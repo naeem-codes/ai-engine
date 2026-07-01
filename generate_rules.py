@@ -1,5 +1,5 @@
 import json
-from models import GenerateRulesRequest, GenerateRulesResponse, RulePair, SkipEntry
+from models import GenerateRulesRequest, GenerateRulesResponse, RulePair, SkipEntry, ThicknessRule
 from llm import call_llm
 from prompts import rules_system_prompt
 from log import log, section
@@ -22,10 +22,10 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     log(f"  master_height_dim : {req.master_height_dim or 'null'}")
 
     # Keep dims >= 50 mm (noise filter for unclassified dims), but ALWAYS keep
-    # dims the app already labeled [W]/[H] — they are axis drivers regardless of
-    # size (e.g. a 12.7 mm LED-strip width). Generic: no model-specific names.
+    # dims the app already labeled [W]/[H]/[D] — they are axis drivers regardless of
+    # size (a 12.7 mm LED-strip width, or a 1.5 mm sheet-metal thickness). Generic.
     def _keep(d):
-        return d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H")
+        return d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H", "D")
     large_dims = [d for d in req.dimensions if _keep(d)]
     dim_list = "\n".join(
         f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
@@ -42,7 +42,9 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
             master_height_dim=req.master_height_dim,
         ),
         "Generate resize rules for this assembly.",
-        max_tokens=4096,
+        # Large assemblies emit big width/height also_change lists PLUS a depth_rules
+        # entry per component — 4096 truncated mid-array. Claude Sonnet allows far more.
+        max_tokens=8192,
     )
 
     try:
@@ -79,6 +81,19 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         if entry.get("name")
     ]
 
+    # Thickness (Z) rules — a FLAT list, one entry per component with a [D]-labeled
+    # thickness dim. No dependencies (thickness never cascades). The app lets the user
+    # add/remove/correct these in the rules UI, so partial detection is fine.
+    depth_rules = [
+        ThicknessRule(
+            component=entry.get("component", ""),
+            dim=entry.get("dim", ""),
+            label=entry.get("label", ""),
+        )
+        for entry in data.get("depth_rules", [])
+        if entry.get("dim")
+    ]
+
     component_labels = data.get("component_labels", {})
     if not isinstance(component_labels, dict):
         component_labels = {}
@@ -87,5 +102,5 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     if not isinstance(part_label, str):
         part_label = ""
 
-    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  skip={len(skip)}  component_labels={len(component_labels)}  part_label={part_label or '(none)'}")
-    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, skip=skip, component_labels=component_labels, part_label=part_label)
+    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  depth_rules={len(depth_rules)}  skip={len(skip)}  component_labels={len(component_labels)}  part_label={part_label or '(none)'}")
+    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, depth=depth_rules, skip=skip, component_labels=component_labels, part_label=part_label)

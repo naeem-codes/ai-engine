@@ -1,9 +1,9 @@
-def rules_dependent_prompt(rules_json: str, labels_block: str = "") -> str:
+def rules_dependent_prompt(rules_json: str, labels_block: str = "", thickness_block: str = "") -> str:
     return f"""You are a SolidWorks CAD resize assistant.
 
 These are the resize rules defined for this assembly:
 {rules_json}
-{labels_block}
+{labels_block}{thickness_block}
 The user will describe a resize in natural language referencing a component or dimension.
 
 HOW TO MATCH THE RULE:
@@ -15,18 +15,24 @@ HOW TO MATCH THE RULE:
   4. If two components share a base name (Left vs Right, inner vs outer), use the English
      name to disambiguate which id (…-1 vs …-2) the user means.
 
+THICKNESS / DEPTH requests (e.g. "make the chassis 2 in thick", "set mirror thickness
+to 6 mm", "change power supply depth"):
+  - Match the component to a THICKNESS DIMENSIONS entry below.
+  - Set "if_changes" to that entry's dim and "also_change" to [] (empty — thickness has
+    NO dependencies and must NEVER scale or drag other dims).
+
 RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
 
 {{
   "rule": {{
-    "if_changes": "exact dim name from rules",
+    "if_changes": "exact dim name from rules or THICKNESS DIMENSIONS",
     "also_change": ["exact dim name", "..."]
   }},
   "value_meters": 1.0668,
   "explanation": "one sentence"
 }}
 
-- Copy if_changes and also_change EXACTLY from the rules JSON above
+- Copy if_changes and also_change EXACTLY from the rules JSON / THICKNESS list above
 - value_meters must be a positive number in meters
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m
 - If unclear: {{"error": "what is unclear"}}"""
@@ -138,11 +144,14 @@ def rules_system_prompt(
 The dimension list below is already labeled by the app — trust these labels:
   [W] = controls width
   [H] = controls height
+  [D] = controls thickness / depth (the Z axis)
   [?] = internal/fixed — ignore completely
 
 Your ONLY job:
   - Look at [W] dims — figure out which ones change together
   - Look at [H] dims — figure out which ones change together
+  - Look at [D] dims — map each to the component it belongs to (thickness is a flat,
+    per-component knob; it has NO dependencies and never cascades to other dims)
   - Identify which dims should NOT change at all
 
 -- ASSEMBLY CONTEXT ----------------------------------------------------------
@@ -203,6 +212,13 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
       "also_change": ["exact [H] dim name", "..."]
     }}
   ],
+  "depth_rules": [
+    {{
+      "component": "exact-component-id (the [Component] suffix of the dim, or \"\" for a single part)",
+      "dim": "exact [D] dim name from the list",
+      "label": "Human Readable thickness name, e.g. \"Chassis thickness\""
+    }}
+  ],
   "skip": [
     {{"name": "exact dim name", "reason": "why skipped"}}
   ],
@@ -211,6 +227,13 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
   }},
   "part_label": "Friendly English name — ONLY when this model is a single part; else \"\""
 }}
+
+THICKNESS (depth_rules):
+  - Emit ONE entry per [D]-labeled dim. If a component has no [D] dim, omit it — do
+    NOT invent a thickness dim from a [W]/[H]/[?] dim.
+  - "label" should read like a shop knob: "<Component> thickness" (e.g. "Chassis
+    thickness", "Mirror glass thickness", "Power supply thickness").
+  - depth_rules is FLAT — never add dependencies or an also_change list to it.
 
 PART vs ASSEMBLY NAMING:
   - ASSEMBLY (has separate components): fill "component_labels" with a friendly English

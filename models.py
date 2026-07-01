@@ -54,6 +54,16 @@ class PositionRule(BaseModel):
     note: str = ""
 
 
+class ThicknessRule(BaseModel):
+    """A standalone thickness/depth (Z-axis) knob: maps a component to the ONE
+    dimension that drives its thickness. Unlike width/height, thickness rules have
+    NO dependencies — changing one component's thickness never cascades to others.
+    `label` is the human-readable name shown in the UI (e.g. "Chassis thickness")."""
+    component: str = ""
+    dim: str = ""        # exact display-dim name that drives the Z extent
+    label: str = ""      # human-readable name, e.g. "Chassis thickness"
+
+
 class SkipEntry(BaseModel):
     name: str
     reason: str
@@ -74,6 +84,8 @@ class GenerateRulesResponse(BaseModel):
     # and forwards them — it never applies them (component ops happen in SolidWorks).
     pattern_rules: list[dict] = []
     position: list[PositionRule] = []
+    # Flat thickness (Z-axis) map: component → its thickness dim. No dependencies.
+    depth: list[ThicknessRule] = []
     error: str | None = None
 
 
@@ -86,6 +98,7 @@ class SaveRulesRequest(BaseModel):
     limits: dict[str, float] = {}
     pattern_rules: list[dict] = []
     position: list[PositionRule] = []
+    depth: list[ThicknessRule] = []
 
 
 # ── Production-drawing plan models (prompt → verb JSON → app ExecutePlan) ──────
