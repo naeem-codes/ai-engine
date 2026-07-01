@@ -64,6 +64,10 @@ class GenerateRulesResponse(BaseModel):
     height_rules: list[RulePair] = []
     skip: list[SkipEntry] = []
     component_labels: dict[str, str] = {}
+    # Friendly English name for a SINGLE-PART model (no components to label). Empty for
+    # assemblies, which use component_labels instead. Lets the app show "Main Chassis"
+    # rather than the raw file name / technical dim name in the rules UI.
+    part_label: str = ""
     limits: dict[str, float] = {}
     # Component-multiplication rules (e.g. LED strips that scale in count with size).
     # Kept as free-form dicts so the .NET app owns the schema; the engine only stores
@@ -82,3 +86,33 @@ class SaveRulesRequest(BaseModel):
     limits: dict[str, float] = {}
     pattern_rules: list[dict] = []
     position: list[PositionRule] = []
+
+
+# ── Production-drawing plan models (prompt → verb JSON → app ExecutePlan) ──────
+# SEPARATE flow from resize. The AI translates English into a list of operations
+# (verbs from a FIXED vocabulary); the .NET app validates + executes them. The AI
+# NEVER chooses scale or view positions — the app owns geometry.
+
+class DrawingPlanRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    instruction: str
+    model_path: str | None = None
+    assembly_context: str | None = None
+
+
+class DrawingOp(BaseModel):
+    """One operation from the fixed verb vocabulary. Only fields relevant to the
+    verb are set; the rest stay None. The app validates verb + params before use."""
+    verb: str
+    type: str | None = None     # create_view: front|back|left|right|top|bottom|iso|trimetric|dimetric
+    value: str | None = None    # set_units: inch|mm
+    scheme: str | None = None   # auto_dimension: ordinate|baseline|chain
+    view: str | None = None     # auto_dimension: which view to dimension (default front)
+    preset: str | None = None   # add_notes: standard
+    lines: list[str] = []       # add_notes: explicit note lines
+
+
+class DrawingPlanResponse(BaseModel):
+    operations: list[DrawingOp] = []
+    explanation: str | None = None
+    error: str | None = None

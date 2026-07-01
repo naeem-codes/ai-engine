@@ -83,5 +83,9 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     if not isinstance(component_labels, dict):
         component_labels = {}
 
-    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  skip={len(skip)}  component_labels={len(component_labels)}")
-    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, skip=skip, component_labels=component_labels)
+    part_label = data.get("part_label", "")
+    if not isinstance(part_label, str):
+        part_label = ""
+
+    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  skip={len(skip)}  component_labels={len(component_labels)}  part_label={part_label or '(none)'}")
+    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, skip=skip, component_labels=component_labels, part_label=part_label)

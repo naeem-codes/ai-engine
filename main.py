@@ -13,9 +13,10 @@ load_dotenv(BASE_DIR / ".env")
 
 import json
 from fastapi import FastAPI
-from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest
+from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest, DrawingPlanRequest, DrawingPlanResponse
 from interpret import interpret as run_interpret
 from generate_rules import generate_rules as run_generate_rules
+from generate_drawing_plan import generate_drawing_plan as run_drawing_plan
 
 RULES_DIR = BASE_DIR / "rules"
 
@@ -35,6 +36,11 @@ async def interpret_endpoint(req: InterpretRequest) -> InterpretResponse:
 @app.post("/generate-rules", response_model=GenerateRulesResponse)
 async def generate_rules_endpoint(req: GenerateRulesRequest) -> GenerateRulesResponse:
     return await run_generate_rules(req)
+
+
+@app.post("/drawing-plan", response_model=DrawingPlanResponse)
+async def drawing_plan_endpoint(req: DrawingPlanRequest) -> DrawingPlanResponse:
+    return await run_drawing_plan(req)
 
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)

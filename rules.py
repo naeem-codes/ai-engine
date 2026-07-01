@@ -48,6 +48,10 @@ class ModelRules:
     width: list[RulePairEntry] = field(default_factory=list)
     height: list[RulePairEntry] = field(default_factory=list)
     position: list[PositionRuleEntry] = field(default_factory=list)
+    # Map of component-id → human-friendly name (e.g. "LPM-24096A-2" → "Right LED
+    # power supply"). Used so the interpret LLM can resolve a named component to the
+    # correct rule instead of guessing from cryptic dim names.
+    component_labels: dict[str, str] = field(default_factory=dict)
 
 
 def load_rules(model_path: str | None) -> ModelRules | None:
@@ -87,12 +91,17 @@ def load_rules(model_path: str | None) -> ModelRules | None:
             result.append(PositionRuleEntry(**{k: v for k, v in item.items() if k in known}))
         return result
 
+    component_labels = data.get("component_labels", {})
+    if not isinstance(component_labels, dict):
+        component_labels = {}
+
     return ModelRules(
         model=data.get("model", stem),
         limits=limits,
         width=parse_pairs(data.get("width", [])),
         height=parse_pairs(data.get("height", [])),
         position=parse_positions(data.get("position", [])),
+        component_labels=component_labels,
     )
 
 

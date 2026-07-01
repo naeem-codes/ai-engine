@@ -57,8 +57,20 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
                 "height": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.height],
             }, indent=2)
-            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars")
-            raw = await call_llm(rules_dependent_prompt(rules_json), req.instruction, max_tokens=512)
+
+            # Friendly component names so the LLM can resolve "Right LED power supply" to the
+            # right component id (e.g. LPM-24096A-2) and pick that component's OWN rule —
+            # instead of guessing from cryptic dim names and grabbing an unrelated rule.
+            labels_block = ""
+            if model_rules.component_labels:
+                lines = "\n".join(f"  {cid}  =  {name}" for cid, name in model_rules.component_labels.items())
+                labels_block = (
+                    "\nCOMPONENT NAMES (english name ⇄ component id — use to resolve which "
+                    f"component the user means):\n{lines}\n"
+                )
+
+            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}")
+            raw = await call_llm(rules_dependent_prompt(rules_json, labels_block), req.instruction, max_tokens=512)
             try:
                 data = json.loads(_strip_fences(raw))
             except json.JSONDecodeError as exc:
