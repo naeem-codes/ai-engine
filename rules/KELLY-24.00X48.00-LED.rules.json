@@ -1,0 +1,260 @@
+{
+  "model": "KELLY-24.00X48.00-LED",
+  "width": [
+    {
+      "if_changes": "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+      "also_change": [
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@Sketch1 [9535-CHASSIS-2]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@WIDTH [LPM-24060A-1]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D1@Sketch1 [1005-CLIP-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@Sketch1 [1005-CLIP-1]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D1@WIDTH [LPM-24060A-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Base-Flange1 [1119-HANGER-1]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D1@WIDTH [LPM-24060A-1]",
+        "D1@Sketch1 [1005-CLIP-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D1@WIDTH [LPM-24060A-1]",
+        "D1@Sketch1 [1005-CLIP-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]",
+      "also_change": [
+        "WIDTH@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D1@Sketch1 [9535-CHASSIS-2]",
+        "D2@Sheet-Metal1 [9535-CHASSIS-2]",
+        "Thru Tap Drill Depth@Sketch107 [9535-CHASSIS-2]",
+        "D1@WIDTH [LPM-24060A-1]",
+        "D1@Sketch1 [1005-CLIP-1]",
+        "D2@Base-Flange1 [1119-HANGER-1]",
+        "D2@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]"
+      ]
+    }
+  ],
+  "height": [
+    {
+      "if_changes": "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+      "also_change": [
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Sketch1 [9535-CHASSIS-2]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D4@Sketch99 [9535-CHASSIS-2]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D2@Sketch1 [1005-CLIP-1]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@Sketch1 [1119-HANGER-1]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]"
+      ]
+    },
+    {
+      "if_changes": "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-2]",
+      "also_change": [
+        "HEIGHT@Sketch1 [1021-MIRROR-KELLY-1]",
+        "D2@Sketch1 [9535-CHASSIS-2]",
+        "D4@Sketch99 [9535-CHASSIS-2]",
+        "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+        "D2@Sketch1 [1005-CLIP-1]",
+        "D1@Sketch1 [1119-HANGER-1]",
+        "D1@Boss-Extrude1 [Zortech-Low-Profile-Double Row LEDS-1]"
+      ]
+    }
+  ],
+  "component_labels": {
+    "LPM-24060A-1": "Power Supply",
+    "1005-CLIP-1": "Mirror Clip",
+    "9534-CHASSIS-ASSY-1": "Chassis Assembly",
+    "9535-CHASSIS-2": "Main Chassis",
+    "Zortech-Low-Profile-Double Row LEDS-1": "LED Strip (Left)",
+    "Zortech-Low-Profile-Double Row LEDS-2": "LED Strip (Right)",
+    "1119-HANGER-1": "Mirror Hanger",
+    "1021-MIRROR-KELLY-1": "Mirror Glass"
+  },
+  "offset": [
+    {
+      "component": "KELLY-24.00X48",
+      "target_dim": "D1@Distance2",
+      "source_dim": "D2@LENGTH/HEIGHT [LPM-24060A-1]",
+      "offset_meters": -0.0283972,
+      "note": ""
+    }
+  ],
+  "depth": [
+    {
+      "component": "LPM-24060A-1",
+      "dim": "D1@LENGTH/HEIGHT [LPM-24060A-1]",
+      "label": "Power supply thickness"
+    },
+    {
+      "component": "1005-CLIP-1",
+      "dim": "Thickness@Sheet-Metal1 [1005-CLIP-1]",
+      "label": "Clip thickness"
+    },
+    {
+      "component": "9535-CHASSIS-2",
+      "dim": "Thickness@Sheet-Metal1 [9535-CHASSIS-2]",
+      "label": "Chassis thickness"
+    },
+    {
+      "component": "Zortech-Low-Profile-Double Row LEDS-1",
+      "dim": "D1@Sketch1 [Zortech-Low-Profile-Double Row LEDS-1]",
+      "label": "LED strip depth"
+    },
+    {
+      "component": "Zortech-Low-Profile-Double Row LEDS-2",
+      "dim": "D1@Sketch1 [Zortech-Low-Profile-Double Row LEDS-2]",
+      "label": "LED strip depth"
+    },
+    {
+      "component": "1119-HANGER-1",
+      "dim": "Thickness@Sheet-Metal1 [1119-HANGER-1]",
+      "label": "Hanger thickness"
+    },
+    {
+      "component": "1021-MIRROR-KELLY-1",
+      "dim": "D1@Extrude1 [1021-MIRROR-KELLY-1]",
+      "label": "Mirror glass thickness"
+    }
+  ]
+}

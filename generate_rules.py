@@ -43,13 +43,26 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         ),
         "Generate resize rules for this assembly.",
         # Large assemblies emit big width/height also_change lists PLUS a depth_rules
-        # entry per component — 4096 truncated mid-array. Claude Sonnet allows far more.
-        max_tokens=8192,
+        # entry per component. 8192 still truncated mid-string on big assemblies
+        # (unterminated-JSON errors). claude-sonnet-4-6 allows up to 128K output;
+        # 16000 stays within the non-streaming HTTP timeout while covering assemblies
+        # several times larger. Raise further (and stream in llm.py) if this recurs.
+        max_tokens=16000,
     )
 
+    cleaned = _strip_fences(raw)
     try:
-        data = json.loads(_strip_fences(raw))
+        data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
+        # An unterminated string / missing closing brace almost always means the
+        # model hit max_tokens and the JSON was cut off mid-output — not malformed
+        # output. Surface that plainly instead of the raw parser error.
+        looks_truncated = "Unterminated" in str(exc) or not cleaned.rstrip().endswith("}")
+        if looks_truncated:
+            msg = ("AI response was truncated (assembly too large for the current "
+                   "token limit). Increase max_tokens in generate_rules.py.")
+            log(f"  ERROR: response truncated at {len(cleaned)} chars: {exc}")
+            return GenerateRulesResponse(error=msg)
         log(f"  ERROR: invalid JSON: {exc}")
         return GenerateRulesResponse(error=f"LLM returned invalid JSON: {exc}")
 
