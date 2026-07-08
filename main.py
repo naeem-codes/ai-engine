@@ -45,7 +45,7 @@ async def drawing_plan_endpoint(req: DrawingPlanRequest) -> DrawingPlanResponse:
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)
 async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
-    from models import RulePair, PositionRule, ThicknessRule
+    from models import RulePair, PositionRule, ThicknessRule, OffsetRule
     stem = Path(model_path).stem
     candidate = RULES_DIR / f"{stem}.rules.json"
     if not candidate.exists():
@@ -63,6 +63,11 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         for r in data.get("depth", [])
         if r.get("dim")
     ]
+    offset = [
+        OffsetRule(**{k: v for k, v in r.items() if k in OffsetRule.model_fields})
+        for r in data.get("offset", [])
+        if r.get("target_dim") and r.get("source_dim")
+    ]
     return GenerateRulesResponse(
         width_rules=parse(data.get("width", [])),
         height_rules=parse(data.get("height", [])),
@@ -71,6 +76,7 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         pattern_rules=data.get("pattern_rules", []),
         position=position,
         depth=depth,
+        offset=offset,
     )
 
 
@@ -96,6 +102,7 @@ async def save_rules_endpoint(req: SaveRulesRequest):
     pattern_rules = preserve(req.pattern_rules, "pattern_rules")
     position = preserve(req.position, "position")
     depth = preserve(req.depth, "depth")
+    offset = preserve(req.offset, "offset")
 
     doc = {
         "model": stem,
@@ -111,6 +118,8 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         doc["position"] = position
     if depth:
         doc["depth"] = depth
+    if offset:
+        doc["offset"] = offset
     out_path.write_text(json.dumps(doc, indent=2))
     return {"saved": str(out_path)}
 

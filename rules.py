@@ -42,6 +42,25 @@ class PositionRuleEntry:
 
 
 @dataclass
+class OffsetRuleEntry:
+    """Keeps a target dim a CONSTANT ABSOLUTE distance from a source dim as the model
+    resizes. When `source_dim` is among a turn's changes, `target_dim` is set to
+    `new_source + offset_meters` (a fixed metre gap, never a ratio; offset may be
+    negative). Unlike a position rule this compares two SIZE/LOCATION dims directly.
+
+    Motivating case: the chassis hanging-tab spacing (`D1@Sketch81`) must follow the
+    hanger width (`D2@Base-Flange1`) — the hanger's two slots are cut a fixed inset in
+    from its side edges, so widening the hanger drags the slots outward. Linking the tab
+    spacing to `hanger_width + (tab_spacing - hanger_width)` keeps the tab seated in the
+    slot for any width. offset is derived once from the aligned model, not hard-coded."""
+    target_dim: str = ""
+    source_dim: str = ""
+    offset_meters: float = 0.0
+    component: str = ""
+    note: str = ""
+
+
+@dataclass
 class ThicknessRuleEntry:
     """A standalone thickness/depth (Z) knob: a component and the single dim that
     drives its thickness. No dependencies — thickness never cascades to other dims."""
@@ -58,6 +77,7 @@ class ModelRules:
     height: list[RulePairEntry] = field(default_factory=list)
     position: list[PositionRuleEntry] = field(default_factory=list)
     depth: list[ThicknessRuleEntry] = field(default_factory=list)
+    offset: list[OffsetRuleEntry] = field(default_factory=list)
     # Map of component-id → human-friendly name (e.g. "LPM-24096A-2" → "Right LED
     # power supply"). Used so the interpret LLM can resolve a named component to the
     # correct rule instead of guessing from cryptic dim names.
@@ -110,6 +130,16 @@ def load_rules(model_path: str | None) -> ModelRules | None:
             result.append(ThicknessRuleEntry(**{k: v for k, v in item.items() if k in known}))
         return result
 
+    def parse_offsets(lst):
+        known = {f.name for f in dataclasses.fields(OffsetRuleEntry)}
+        result = []
+        for item in lst:
+            # A link needs BOTH ends; drop incomplete entries.
+            if not item.get("target_dim") or not item.get("source_dim"):
+                continue
+            result.append(OffsetRuleEntry(**{k: v for k, v in item.items() if k in known}))
+        return result
+
     component_labels = data.get("component_labels", {})
     if not isinstance(component_labels, dict):
         component_labels = {}
@@ -121,6 +151,7 @@ def load_rules(model_path: str | None) -> ModelRules | None:
         height=parse_pairs(data.get("height", [])),
         position=parse_positions(data.get("position", [])),
         depth=parse_depth(data.get("depth", [])),
+        offset=parse_offsets(data.get("offset", [])),
         component_labels=component_labels,
     )
 
@@ -225,4 +256,28 @@ def expand_positions(
         if abs(delta) < 1e-9:
             continue
         out.append((p.position_dim, old_pos + p.factor * delta))
+    return out
+
+
+def expand_offsets(
+    model_rules: ModelRules,
+    changes_by_name: dict[str, float],
+    current_dims: dict[str, float] | None = None,
+) -> list[tuple[str, float]]:
+    """Enforce fixed-offset links: `target_dim = new_source + offset_meters`.
+
+    A link fires only when its `source_dim` is among the dims already being changed
+    this turn (`changes_by_name`) — so a width-driven source only fires on a width
+    resize, making the link axis-correct without an axis field. The offset is an
+    ABSOLUTE metre gap (never scaled), so the target tracks the source rigidly.
+    Returns [(target_dim, new_value_meters), ...] to override/append after scaling.
+    """
+    out: list[tuple[str, float]] = []
+    for r in model_rules.offset:
+        if not r.target_dim or not r.source_dim:
+            continue
+        if r.source_dim not in changes_by_name:
+            continue  # the source dim isn't moving this turn → nothing to follow
+        new_source = changes_by_name[r.source_dim]
+        out.append((r.target_dim, new_source + r.offset_meters))
     return out

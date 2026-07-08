@@ -64,6 +64,19 @@ class ThicknessRule(BaseModel):
     label: str = ""      # human-readable name, e.g. "Chassis thickness"
 
 
+class OffsetRule(BaseModel):
+    """A fixed-offset link: `target_dim` is held a constant absolute distance
+    (`offset_meters`, may be negative) from `source_dim`. On resize, when the source
+    dim changes the target is set to `new_source + offset_meters` — never scaled. Used
+    to keep the hanging-tab spacing following the hanger width so the tab stays in its
+    slot. `note` documents the intent/derivation of the offset for the UI."""
+    component: str = ""
+    target_dim: str = ""
+    source_dim: str = ""
+    offset_meters: float = 0.0
+    note: str = ""
+
+
 class SkipEntry(BaseModel):
     name: str
     reason: str
@@ -86,6 +99,8 @@ class GenerateRulesResponse(BaseModel):
     position: list[PositionRule] = []
     # Flat thickness (Z-axis) map: component → its thickness dim. No dependencies.
     depth: list[ThicknessRule] = []
+    # Fixed-offset links (target dim tracks source dim + constant gap).
+    offset: list[OffsetRule] = []
     error: str | None = None
 
 
@@ -99,6 +114,7 @@ class SaveRulesRequest(BaseModel):
     pattern_rules: list[dict] = []
     position: list[PositionRule] = []
     depth: list[ThicknessRule] = []
+    offset: list[OffsetRule] = []
 
 
 # ── Production-drawing plan models (prompt → verb JSON → app ExecutePlan) ──────

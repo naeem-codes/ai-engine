@@ -1,6 +1,6 @@
 import json
 from models import InterpretRequest, DimensionChange, InterpretResponse
-from rules import load_rules, validate, expand_positions, find_depth_rule
+from rules import load_rules, validate, expand_positions, expand_offsets, find_depth_rule
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -143,6 +143,21 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 else:
                     log(f"    [POS] {pos_dim} = {pos_val*1000:.2f} mm (edge-follow)")
                     changes.append(DimensionChange(name=pos_dim, value_meters=pos_val))
+
+            # Fixed-offset links: hold a target dim a constant absolute distance from a
+            # source dim (e.g. hanging-tab spacing follows the hanger width so the tab
+            # stays in its slot). Runs LAST so it sees the scaled source value, and
+            # overrides any proportional value for the target (a rigid gap must not scale).
+            changes_by_name = {c.name: c.value_meters for c in changes}
+            off_changes = expand_offsets(model_rules, changes_by_name, current_dims)
+            for off_dim, off_val in off_changes:
+                existing = next((c for c in changes if c.name == off_dim), None)
+                if existing is not None:
+                    log(f"    [OFFSET] {off_dim} override {existing.value_meters*1000:.2f} → {off_val*1000:.2f} mm")
+                    existing.value_meters = off_val
+                else:
+                    log(f"    [OFFSET] {off_dim} = {off_val*1000:.2f} mm (linked to source + offset)")
+                    changes.append(DimensionChange(name=off_dim, value_meters=off_val))
 
             explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
             _log_changes("CASE 2 rules changes", changes)
