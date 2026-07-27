@@ -88,6 +88,33 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         if entry.get("if_changes")
     ]
 
+    # ── Deterministic axis enforcement ─────────────────────────────────────────
+    # The app's [W]/[H] labels are authoritative for WHICH axis a dim scales on;
+    # the LLM only decides grouping, and its position heuristic misfires here: a
+    # VERTICAL LED strip sits at large X (left/right edge), so "large X → width-
+    # dependent" drags the strip's [H] length dim into width_rules — then the strip
+    # grows on WIDTH prompts and ignores HEIGHT. It also drops on-axis dims (only
+    # one chassis [H] dim captured, so the frame under-grows). Rebuild W/H membership
+    # straight from the labels: every same-axis dim is a master that cascades to all
+    # other same-axis dims (uniform proportional scale). No dim can land on the wrong
+    # axis, and none is missed. depth/skip/labels stay as the LLM produced them; the
+    # rules UI still lets the user trim deps before saving.
+    labels = req.dim_axis_labels or {}
+    w_dims = [d.name for d in req.dimensions if labels.get(d.name) == "W"]
+    h_dims = [d.name for d in req.dimensions if labels.get(d.name) == "H"]
+
+    def _rebuild_axis(axis_dims):
+        return [
+            RulePair(if_changes=m, also_change=[d for d in axis_dims if d != m])
+            for m in axis_dims
+        ]
+
+    if w_dims:
+        width_rules = _rebuild_axis(w_dims)
+    if h_dims:
+        height_rules = _rebuild_axis(h_dims)
+    log(f"  axis-enforced: {len(w_dims)} [W] dims, {len(h_dims)} [H] dims")
+
     skip = [
         SkipEntry(name=entry.get("name", ""), reason=entry.get("reason", ""))
         for entry in data.get("skip", [])

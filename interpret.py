@@ -83,7 +83,11 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 )
 
             log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}  depth={len(model_rules.depth)}")
-            raw = await call_llm(rules_dependent_prompt(rules_json, labels_block, thickness_block), req.instruction, max_tokens=512)
+            raw = await call_llm(
+                rules_dependent_prompt(rules_json, labels_block, thickness_block,
+                                       master_width_dim=req.master_width_dim,
+                                       master_height_dim=req.master_height_dim),
+                req.instruction, max_tokens=512)
             try:
                 data = json.loads(_strip_fences(raw))
             except json.JSONDecodeError as exc:
@@ -95,7 +99,26 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             if_changes = rule_data.get("if_changes", "")
             also_change = rule_data.get("also_change", [])
             value_meters = float(data.get("value_meters", 0))
-            log(f"  if_changes={if_changes!r}  value_meters={value_meters}")
+            scope = str(data.get("scope", "")).strip().lower()
+            log(f"  if_changes={if_changes!r}  value_meters={value_meters}  scope={scope!r}")
+
+            # SAFETY NET — re-anchor an overall resize to the true master dim. A component dim
+            # literally named "WIDTH"/"HEIGHT" (e.g. a 59mm power-supply D1@WIDTH) can get picked
+            # for a plain "change width to 40" and, since value_meters is applied to if_changes,
+            # the master then scales by (target / tiny-component) → the whole assembly blows up
+            # (observed 17x). For an overall change, if_changes MUST be the master dim. The axis
+            # comes from the picked dim (still the right AXIS even if the wrong dim); we then swap
+            # to that axis's master and use the master rule's own also_change.
+            if scope == "overall" and if_changes:
+                on_width = any(r.if_changes == if_changes for r in model_rules.width)
+                master = req.master_width_dim if on_width else req.master_height_dim
+                axis_rules = model_rules.width if on_width else model_rules.height
+                if master and if_changes != master:
+                    mrule = next((r for r in axis_rules if r.if_changes == master), None)
+                    if mrule is not None:
+                        log(f"  [OVERALL] re-anchored if_changes {if_changes!r} → master {master!r}")
+                        if_changes = master
+                        also_change = list(mrule.also_change)
 
             if not if_changes or value_meters <= 0:
                 return InterpretResponse(error="AI returned invalid rule response")

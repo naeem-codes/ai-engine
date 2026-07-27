@@ -1,4 +1,8 @@
-def rules_dependent_prompt(rules_json: str, labels_block: str = "", thickness_block: str = "") -> str:
+def rules_dependent_prompt(rules_json: str, labels_block: str = "", thickness_block: str = "",
+                           master_width_dim: str | None = None,
+                           master_height_dim: str | None = None) -> str:
+    mw = master_width_dim or "null"
+    mh = master_height_dim or "null"
     return f"""You are a SolidWorks CAD resize assistant.
 
 These are the resize rules defined for this assembly:
@@ -6,7 +10,21 @@ These are the resize rules defined for this assembly:
 {labels_block}{thickness_block}
 The user will describe a resize in natural language referencing a component or dimension.
 
-HOW TO MATCH THE RULE:
+MASTER DIMENSIONS (the overall outside size of the whole mirror):
+  master width  = {mw}
+  master height = {mh}
+
+OVERALL SIZE CHANGE — THE MOST COMMON REQUEST (e.g. "change width to 40",
+"make it 30 inches tall", "resize height to 24", "40 x 30"):
+  - The user means the WHOLE mirror's outside width/height — NOT any single component.
+  - Set "if_changes" to EXACTLY the master dim above for that axis (copy it verbatim).
+  - Set "scope" to "overall".
+  - Set "also_change" to that master rule's own also_change list from the rules JSON.
+  - IMPORTANT: Do NOT pick a dim just because its NAME contains "WIDTH" or "HEIGHT". A dim like
+    "D1@WIDTH [LPM-...]" is one small component's own width (often only 2-3 inches) — it is
+    NOT the overall width. Choosing it would set a tiny part to 40" and blow up the assembly.
+
+HOW TO MATCH THE RULE (only when the user NAMES a specific component):
   1. The user names a component in plain English (e.g. "Right LED power supply").
   2. Use the COMPONENT NAMES map above to find that component's id (e.g. "LPM-24096A-2").
   3. Pick the rule whose "if_changes" dim belongs to THAT component id — i.e. its name
@@ -28,10 +46,13 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
     "if_changes": "exact dim name from rules or THICKNESS DIMENSIONS",
     "also_change": ["exact dim name", "..."]
   }},
+  "scope": "overall",
   "value_meters": 1.0668,
   "explanation": "one sentence"
 }}
 
+- "scope": "overall" ONLY for a whole-mirror width/height change (if_changes must be the
+  master dim); omit it (or "") for a named-component or thickness change
 - Copy if_changes and also_change EXACTLY from the rules JSON / THICKNESS list above
 - value_meters must be a positive number in meters
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m

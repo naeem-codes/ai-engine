@@ -1,3 +1,4 @@
+import json
 import os
 import httpx
 from log import log, section
@@ -8,11 +9,17 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODEL = "gpt-5.1"
 
+# Stream so response headers arrive immediately and the read timeout applies
+# per-chunk instead of to the whole generation. A long connect budget guards
+# against a slow handshake; reads can idle up to `read` seconds between chunks.
+STREAM_TIMEOUT = httpx.Timeout(600.0, connect=15.0, read=120.0)
+
 
 async def call_claude(system_prompt: str, user_message: str, max_tokens: int = 256) -> str:
     api_key = os.environ["ANTHROPIC_API_KEY"]
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
+    async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
+        async with client.stream(
+            "POST",
             CLAUDE_URL,
             headers={
                 "x-api-key": api_key,
@@ -24,17 +31,35 @@ async def call_claude(system_prompt: str, user_message: str, max_tokens: int = 2
                 "max_tokens": max_tokens,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_message}],
+                "stream": True,
             },
-        )
-        response.raise_for_status()
-        return response.json()["content"][0]["text"]
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                response.raise_for_status()
+
+            parts = []
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data:
+                    continue
+                event = json.loads(data)
+                if (
+                    event.get("type") == "content_block_delta"
+                    and event.get("delta", {}).get("type") == "text_delta"
+                ):
+                    parts.append(event["delta"]["text"])
+            return "".join(parts)
 
 
 async def call_openai(system_prompt: str, user_message: str, max_tokens: int = 256) -> str:
     api_key = os.environ["OPENAI_API_KEY"]
     effective_tokens = max(max_tokens * 4, 4096)
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
+    async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
+        async with client.stream(
+            "POST",
             OPENAI_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -47,10 +72,29 @@ async def call_openai(system_prompt: str, user_message: str, max_tokens: int = 2
                     {"role": "developer", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ],
+                "stream": True,
             },
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                response.raise_for_status()
+
+            parts = []
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data or data == "[DONE]":
+                    continue
+                event = json.loads(data)
+                choices = event.get("choices")
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                content = delta.get("content")
+                if content:
+                    parts.append(content)
+            return "".join(parts)
 
 
 async def call_llm(system_prompt: str, user_message: str, max_tokens: int = 256) -> str:
