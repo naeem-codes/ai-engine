@@ -1,4 +1,4 @@
-def rules_dependent_prompt(rules_json: str, labels_block: str = "", thickness_block: str = "",
+def rules_dependent_prompt(rules_json: str, labels_block: str = "",
                            master_width_dim: str | None = None,
                            master_height_dim: str | None = None) -> str:
     mw = master_width_dim or "null"
@@ -7,7 +7,7 @@ def rules_dependent_prompt(rules_json: str, labels_block: str = "", thickness_bl
 
 These are the resize rules defined for this assembly:
 {rules_json}
-{labels_block}{thickness_block}
+{labels_block}
 The user will describe a resize in natural language referencing a component or dimension.
 
 MASTER DIMENSIONS (the overall outside size of the whole mirror):
@@ -34,16 +34,17 @@ HOW TO MATCH THE RULE (only when the user NAMES a specific component):
      name to disambiguate which id (…-1 vs …-2) the user means.
 
 THICKNESS / DEPTH requests (e.g. "make the chassis 2 in thick", "set mirror thickness
-to 6 mm", "change power supply depth"):
-  - Match the component to a THICKNESS DIMENSIONS entry below.
-  - Set "if_changes" to that entry's dim and "also_change" to [] (empty — thickness has
-    NO dependencies and must NEVER scale or drag other dims).
+to 6 mm", "change power supply depth") are NOT SUPPORTED:
+  - These rules cover WIDTH and HEIGHT only. There is no thickness/depth rule.
+  - Return {{"error": "Thickness/depth changes are not supported — rules cover width and
+    height only."}} and pick NO rule. NEVER substitute a width or height rule for a
+    thickness request; resizing an unrelated dim would distort the model.
 
 RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
 
 {{
   "rule": {{
-    "if_changes": "exact dim name from rules or THICKNESS DIMENSIONS",
+    "if_changes": "exact dim name from the rules JSON",
     "also_change": ["exact dim name", "..."]
   }},
   "scope": "overall",
@@ -52,8 +53,8 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
 }}
 
 - "scope": "overall" ONLY for a whole-mirror width/height change (if_changes must be the
-  master dim); omit it (or "") for a named-component or thickness change
-- Copy if_changes and also_change EXACTLY from the rules JSON / THICKNESS list above
+  master dim); omit it (or "") for a named-component change
+- Copy if_changes and also_change EXACTLY from the rules JSON above
 - value_meters must be a positive number in meters
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m
 - If unclear: {{"error": "what is unclear"}}"""
@@ -165,14 +166,13 @@ def rules_system_prompt(
 The dimension list below is already labeled by the app — trust these labels:
   [W] = controls width
   [H] = controls height
-  [D] = controls thickness / depth (the Z axis)
+  [D] = controls thickness / depth (the Z axis) — ignore completely; rules cover
+        width and height only, so a [D] dim NEVER belongs in any rule
   [?] = internal/fixed — ignore completely
 
 Your ONLY job:
   - Look at [W] dims — figure out which ones change together
   - Look at [H] dims — figure out which ones change together
-  - Look at [D] dims — map each to the component it belongs to (thickness is a flat,
-    per-component knob; it has NO dependencies and never cascades to other dims)
   - Identify which dims should NOT change at all
 
 -- ASSEMBLY CONTEXT ----------------------------------------------------------
@@ -183,6 +183,7 @@ Your ONLY job:
 Each dimension below is pre-labeled by the application — trust these labels:
   [W] = controls width
   [H] = controls height
+  [D] = thickness/depth — DO NOT include in any rule
   [?] = internal/fixed — DO NOT include in any rule
 
 Master dims (already identified by app):
@@ -213,8 +214,8 @@ Master dims (already identified by app):
   Do NOT limit also_change to dims from the same component as if_changes.
 
 -- STRICT RULES ---------------------------------------------------------------
-  - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] dim
-  - height_rules must ONLY contain [H] labeled dims — NEVER include any [W] dim
+  - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] or [D] dim
+  - height_rules must ONLY contain [H] labeled dims — NEVER include any [W] or [D] dim
   - NEVER include the if_changes dim inside its own also_change list
   - NEVER repeat the same dim twice in also_change
 
@@ -233,13 +234,6 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
       "also_change": ["exact [H] dim name", "..."]
     }}
   ],
-  "depth_rules": [
-    {{
-      "component": "exact-component-id (the [Component] suffix of the dim, or \"\" for a single part)",
-      "dim": "exact [D] dim name from the list",
-      "label": "Human Readable thickness name, e.g. \"Chassis thickness\""
-    }}
-  ],
   "skip": [
     {{"name": "exact dim name", "reason": "why skipped"}}
   ],
@@ -248,13 +242,6 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
   }},
   "part_label": "Friendly English name — ONLY when this model is a single part; else \"\""
 }}
-
-THICKNESS (depth_rules):
-  - Emit ONE entry per [D]-labeled dim. If a component has no [D] dim, omit it — do
-    NOT invent a thickness dim from a [W]/[H]/[?] dim.
-  - "label" should read like a shop knob: "<Component> thickness" (e.g. "Chassis
-    thickness", "Mirror glass thickness", "Power supply thickness").
-  - depth_rules is FLAT — never add dependencies or an also_change list to it.
 
 PART vs ASSEMBLY NAMING:
   - ASSEMBLY (has separate components): fill "component_labels" with a friendly English

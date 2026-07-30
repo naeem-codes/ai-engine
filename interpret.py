@@ -1,6 +1,6 @@
 import json
 from models import InterpretRequest, DimensionChange, InterpretResponse
-from rules import load_rules, validate, expand_positions, expand_offsets, find_depth_rule
+from rules import load_rules, validate, expand_positions, expand_offsets
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -70,21 +70,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                     f"component the user means):\n{lines}\n"
                 )
 
-            # Thickness (Z) dims the user can address by name, e.g. "make the chassis 2in thick".
-            thickness_block = ""
-            if model_rules.depth:
-                lines = "\n".join(
-                    f"  {d.label or d.dim}  =  dim {d.dim}" + (f"  (component {d.component})" if d.component else "")
-                    for d in model_rules.depth
-                )
-                thickness_block = (
-                    "\nTHICKNESS DIMENSIONS (human name ⇄ exact thickness dim — use for depth/thickness "
-                    f"requests; changing one NEVER changes another):\n{lines}\n"
-                )
-
-            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}  depth={len(model_rules.depth)}")
+            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}")
             raw = await call_llm(
-                rules_dependent_prompt(rules_json, labels_block, thickness_block,
+                rules_dependent_prompt(rules_json, labels_block,
                                        master_width_dim=req.master_width_dim,
                                        master_height_dim=req.master_height_dim),
                 req.instruction, max_tokens=512)
@@ -122,17 +110,6 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
             if not if_changes or value_meters <= 0:
                 return InterpretResponse(error="AI returned invalid rule response")
-
-            # Thickness (Z) change: standalone, single dim. No proportional scaling, no
-            # width/height limit check, no position expansion — thickness never cascades.
-            depth_rule = find_depth_rule(model_rules, if_changes)
-            if depth_rule is not None:
-                change = DimensionChange(name=if_changes, value_meters=value_meters)
-                explanation = data.get("explanation") or (
-                    f"Set {depth_rule.label or if_changes} to {value_meters / 0.0254:.3f} in"
-                )
-                _log_changes("CASE 2 thickness change", [change])
-                return InterpretResponse(changes=[change], explanation=explanation)
 
             # Validate against limits — skip min check if rule has no dependencies
             trigger = "width" if any(r.if_changes == if_changes for r in model_rules.width) else "height"

@@ -45,7 +45,7 @@ async def drawing_plan_endpoint(req: DrawingPlanRequest) -> DrawingPlanResponse:
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)
 async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
-    from models import RulePair, PositionRule, ThicknessRule, OffsetRule
+    from models import RulePair, PositionRule, OffsetRule
     stem = Path(model_path).stem
     candidate = RULES_DIR / f"{stem}.rules.json"
     if not candidate.exists():
@@ -57,11 +57,6 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         PositionRule(**{k: v for k, v in r.items() if k in PositionRule.model_fields})
         for r in data.get("position", [])
         if r.get("position_dim") and r.get("driver_dim")
-    ]
-    depth = [
-        ThicknessRule(**{k: v for k, v in r.items() if k in ThicknessRule.model_fields})
-        for r in data.get("depth", [])
-        if r.get("dim")
     ]
     offset = [
         OffsetRule(**{k: v for k, v in r.items() if k in OffsetRule.model_fields})
@@ -75,7 +70,6 @@ async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
         limits=data.get("limits", {}),
         pattern_rules=data.get("pattern_rules", []),
         position=position,
-        depth=depth,
         offset=offset,
     )
 
@@ -99,9 +93,10 @@ async def save_rules_endpoint(req: SaveRulesRequest):
                 return []
         return []
 
+    # NOTE: a legacy "depth" block is deliberately NOT preserved — thickness (Z) rules
+    # were removed, so saving drops it from any rules file written before that.
     pattern_rules = preserve(req.pattern_rules, "pattern_rules")
     position = preserve(req.position, "position")
-    depth = preserve(req.depth, "depth")
     offset = preserve(req.offset, "offset")
 
     doc = {
@@ -116,8 +111,6 @@ async def save_rules_endpoint(req: SaveRulesRequest):
         doc["pattern_rules"] = pattern_rules
     if position:
         doc["position"] = position
-    if depth:
-        doc["depth"] = depth
     if offset:
         doc["offset"] = offset
     out_path.write_text(json.dumps(doc, indent=2))

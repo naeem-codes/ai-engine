@@ -61,22 +61,12 @@ class OffsetRuleEntry:
 
 
 @dataclass
-class ThicknessRuleEntry:
-    """A standalone thickness/depth (Z) knob: a component and the single dim that
-    drives its thickness. No dependencies — thickness never cascades to other dims."""
-    component: str = ""
-    dim: str = ""
-    label: str = ""
-
-
-@dataclass
 class ModelRules:
     model: str
     limits: SizeLimits | None
     width: list[RulePairEntry] = field(default_factory=list)
     height: list[RulePairEntry] = field(default_factory=list)
     position: list[PositionRuleEntry] = field(default_factory=list)
-    depth: list[ThicknessRuleEntry] = field(default_factory=list)
     offset: list[OffsetRuleEntry] = field(default_factory=list)
     # Map of component-id → human-friendly name (e.g. "LPM-24096A-2" → "Right LED
     # power supply"). Used so the interpret LLM can resolve a named component to the
@@ -121,15 +111,6 @@ def load_rules(model_path: str | None) -> ModelRules | None:
             result.append(PositionRuleEntry(**{k: v for k, v in item.items() if k in known}))
         return result
 
-    def parse_depth(lst):
-        known = {f.name for f in dataclasses.fields(ThicknessRuleEntry)}
-        result = []
-        for item in lst:
-            if not item.get("dim"):
-                continue
-            result.append(ThicknessRuleEntry(**{k: v for k, v in item.items() if k in known}))
-        return result
-
     def parse_offsets(lst):
         known = {f.name for f in dataclasses.fields(OffsetRuleEntry)}
         result = []
@@ -150,18 +131,9 @@ def load_rules(model_path: str | None) -> ModelRules | None:
         width=parse_pairs(data.get("width", [])),
         height=parse_pairs(data.get("height", [])),
         position=parse_positions(data.get("position", [])),
-        depth=parse_depth(data.get("depth", [])),
         offset=parse_offsets(data.get("offset", [])),
         component_labels=component_labels,
     )
-
-
-def find_depth_rule(model_rules: ModelRules, dim_name: str) -> ThicknessRuleEntry | None:
-    """Return the thickness rule whose dim matches `dim_name` (case-insensitive), else None."""
-    for d in model_rules.depth:
-        if d.dim.lower() == (dim_name or "").lower():
-            return d
-    return None
 
 
 def get_triggers(model_rules: ModelRules) -> list[str]:
