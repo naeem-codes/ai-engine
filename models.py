@@ -22,10 +22,37 @@ class DimensionChange(BaseModel):
     value_meters: float
 
 
+class HangerSelection(BaseModel):
+    """Which prefab hanger the resized glass calls for (see hanger_select.py).
+
+    The dimension writes are already in `InterpretResponse.changes`; this block carries the
+    IDENTITY of the chosen prefab so the app can stamp the `Number` custom property, put the
+    part number on the drawing, and suppress the hanger DXF (the resized part reproduces the
+    prefab's outline, not its internal hole pattern — hangers are stocked, not fabricated).
+    Additive field: older app builds simply ignore it.
+    """
+    part: str | None = None            # e.g. "1333"
+    part_name: str = ""                # e.g. "1333-HANGER"
+    fraction: float = 0.0              # chosen area / glass area
+    in_band: bool = False              # inside the ideal 20-25%
+    under_target: bool = False         # below 20% — accepted, but worth showing
+    over_ceiling: bool = False         # no prefab fit under 25% (small panel)
+    needs_review: bool = False         # nothing suitable — a human should look
+    keep_fitted: bool = False           # the fitted hanger was already in band; nothing written
+    resize_fitted: bool = False         # no prefab qualified; the fitted hanger was scaled
+    reason: str = ""
+    width_dim: str = ""                # dim written with the catalogue width
+    height_dim: str = ""               # dim written with the catalogue height
+    # Chassis dims shifted to keep tracking the hanger width (the HANGING TAB spacing, so
+    # the tabs stay seated in the hanger's slots).
+    follower_dims: list[str] = []
+
+
 class InterpretResponse(BaseModel):
     changes: list[DimensionChange] = []
     explanation: str | None = None
     error: str | None = None
+    hanger: HangerSelection | None = None
 
 
 # ── Generate Rules models ─────────────────────────────────────────────────────

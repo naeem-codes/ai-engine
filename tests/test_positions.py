@@ -107,8 +107,9 @@ async def test_interpret_appends_position_change(pos_rules_dir):
         ))
     assert result.error is None
     by_name = {c.name: c.value_meters for c in result.changes}
-    # Chassis grew proportionally; the PSU offset followed by half that delta.
-    new_chassis = (0.4318 / 0.6096) * 0.762
+    # The chassis tracks the master by a CONSTANT offset (interpret._dependent_value, not
+    # a ratio); the PSU offset then follows by half that delta.
+    new_chassis = 0.4318 + (0.762 - 0.6096)
     expected_pos = 0.1016 + 0.5 * (new_chassis - 0.4318)
     assert "D1@DistX" in by_name
     assert by_name["D1@DistX"] == pytest.approx(expected_pos)

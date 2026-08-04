@@ -108,7 +108,7 @@ async def test_rules_direct_changes_path(rules_dir, base_dims):
 # ── Case 2: classification (no rules file) ────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_classification_calculates_ratios(base_dims):
+async def test_classification_applies_constant_offsets(base_dims):
     llm_json = json.dumps({
         "target_width_meters": 0.762,
         "master_width_dim": "WIDTH@Mirror",
@@ -130,7 +130,9 @@ async def test_classification_calculates_ratios(base_dims):
     width_change = next(c for c in result.changes if c.name == "WIDTH@Mirror")
     led_change = next(c for c in result.changes if c.name == "LED_WIDTH@LED")
     assert width_change.value_meters == pytest.approx(0.762)
-    assert led_change.value_meters == pytest.approx((0.45 / 0.5) * 0.762)
+    # Dependents keep a CONSTANT offset from the master, not a ratio — see
+    # interpret._dependent_value (the AMBER 36->48 regression).
+    assert led_change.value_meters == pytest.approx(0.45 + (0.762 - 0.5))
 
 
 @pytest.mark.asyncio

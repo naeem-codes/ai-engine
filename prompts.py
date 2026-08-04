@@ -33,6 +33,21 @@ HOW TO MATCH THE RULE (only when the user NAMES a specific component):
   4. If two components share a base name (Left vs Right, inner vs outer), use the English
      name to disambiguate which id (…-1 vs …-2) the user means.
 
+FIXED-SIZE COMPONENTS — CANNOT BE RESIZED, AT ANY SIZE:
+  - LED power supply, LED clips, LED brackets. They are catalogue hardware: the
+    assembly's mates REPOSITION them when the mirror grows, but their own size never
+    changes. There is deliberately no rule for them.
+  - If the user asks to resize one (e.g. "make the clips bigger", "set the power supply
+    width to 3 in"), return {{"error": "<component> is fixed-size hardware and cannot be
+    resized — it is repositioned automatically by its mates."}} and pick NO rule.
+  - LED STRIPS: only their LENGTH scales, and it follows whichever axis the strip runs
+    along (vertical strips follow the height, horizontal ones follow the width). Their
+    CROSS-SECTION is a fixed extrusion profile. A request to change an LED strip's profile
+    (e.g. "make the LED strips thicker/wider across") is invalid: return
+    {{"error": "An LED strip's cross-section is a fixed extrusion profile — only its length
+    changes, and that follows the mirror."}}
+  - This does NOT apply to the chassis, hanger, or mirror glass, which resize normally.
+
 THICKNESS / DEPTH requests (e.g. "make the chassis 2 in thick", "set mirror thickness
 to 6 mm", "change power supply depth") are NOT SUPPORTED:
   - These rules cover WIDTH and HEIGHT only. There is no thickness/depth rule.
@@ -212,6 +227,28 @@ Master dims (already identified by app):
   For each if_changes dim, also_change must include the matching axis dims
   from ALL other components that are physically connected via mates.
   Do NOT limit also_change to dims from the same component as if_changes.
+
+-- FIXED-SIZE COMPONENTS — NEVER PUT THESE IN ANY RULE ------------------------
+  These are catalogue hardware. They keep their as-built size at every product size and
+  are repositioned by the assembly's existing mates, so they get NO rule on either axis.
+  Put each of their dims in "skip" instead, with the reason:
+    - LED power supply  (e.g. "LPM-…")
+    - LED clips / mirror clips  (e.g. "…-CLIP-…")
+    - LED brackets  (e.g. "…-LED-BRACKET-…")
+  LED STRIPS (e.g. "Zortech…LEDS") are a special case, and the rule is about the KIND of
+  dim, not its axis:
+    - the strip's LENGTH (a large dim, hundreds of mm) DOES scale — put it in the rule for
+      whichever axis it is labeled, because a strip mounted vertically has its length
+      labeled [H] while one mounted horizontally has it labeled [W];
+    - the strip's CROSS-SECTION (small dims under ~50 mm, e.g. a 12.7 mm profile width)
+      NEVER scales on any axis. Put those in "skip".
+  The chassis is NOT fixed — it resizes normally.
+
+-- MASTER: THE MIRROR GLASS DRIVES EVERYTHING --------------------------------
+  The product needs dependent rules for the MIRROR GLASS width and height ONLY. Emit
+  exactly one width rule and one height rule, each with if_changes = the mirror glass's
+  own [W]/[H] dim (the master dims above) and also_change = every other dim on that
+  axis that must scale with it. Do NOT give any other component its own rule.
 
 -- STRICT RULES ---------------------------------------------------------------
   - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] or [D] dim

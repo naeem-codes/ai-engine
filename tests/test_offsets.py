@@ -98,7 +98,9 @@ async def test_interpret_appends_offset_change(offset_rules_dir):
         ))
     assert result.error is None
     by_name = {c.name: c.value_meters for c in result.changes}
-    # Chassis grew proportionally; A is set to the new chassis value + the fixed 2 cm.
-    new_chassis = (0.4318 / 0.6096) * 0.762
+    # The chassis tracks the master by a CONSTANT offset (not proportionally — see
+    # interpret._dependent_value); A is then set to the new chassis value + the fixed 2 cm.
+    new_chassis = 0.4318 + (0.762 - 0.6096)
+    assert by_name["CHASSIS_W@Chassis"] == pytest.approx(new_chassis)
     assert "D1@DistX" in by_name
     assert by_name["D1@DistX"] == pytest.approx(new_chassis + 0.02)
