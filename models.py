@@ -116,6 +116,10 @@ class GenerateRulesResponse(BaseModel):
     position: list[PositionRule] = []
     # Fixed-offset links (target dim tracks source dim + constant gap).
     offset: list[OffsetRule] = []
+    # Which stored rule set answered a /get-rules call, and how it was found
+    # ("exact-stem" | "family" | "legacy"). Additive: older app builds ignore them.
+    model_key: str = ""
+    source: str = ""
     error: str | None = None
 
 

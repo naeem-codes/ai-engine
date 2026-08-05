@@ -81,6 +81,24 @@ MAX_AREA_FRACTION = 0.25      # the binding ceiling: never exceed 25% if anythin
 # landscape hanger to a portrait one, so orientation is not the discriminator — height is.
 MAX_HEIGHT_FRACTION = 0.60
 
+# How far BELOW the 20% target a prefab may sit and still count as "matching". Beyond this
+# the prefab is rejected and the FITTED hanger is resized instead (client 2026-08-03: "if
+# there isn't one that follows the criteria then we should resize the existing hanger").
+#
+# Without a lower bound, eligibility only required <= 25%, so a hanger far under target still
+# won won the selection: on a 50x36 glass #1038 was picked at **16.67%**, which is what
+# prompted this. The line has to sit between that and the cases already validated:
+#     50x36  #1038 16.67%   <- must be REJECTED (too far under)
+#     KELLY  #1119 18.55%   <- must be ACCEPTED (it is what the real model ships)
+#     AMBER  #1333 19.79%   <- must be ACCEPTED (user approved it explicitly)
+# 2 pp (accept >= 18%) clears both keepers and rejects the failure.
+ACCEPT_BELOW_TARGET_MARGIN = 0.02
+MIN_ACCEPTABLE_FRACTION = TARGET_AREA_FRACTION - ACCEPT_BELOW_TARGET_MARGIN   # 0.18
+
+# A resized hanger is a part someone has to make, so give it clean dimensions rather than
+# raw square-root output (23.243" -> 23.25").
+RESIZE_ROUND_TO_IN = 0.25
+
 # Where to aim when no prefab qualifies and the fitted hanger has to be resized: the middle
 # of the band, so the result is robustly inside it rather than on an edge.
 RESIZE_TARGET_FRACTION = (TARGET_AREA_FRACTION + MAX_AREA_FRACTION) / 2
@@ -178,6 +196,27 @@ class HangerChoice:
         return out
 
 
+def _rejected_oversize(candidates: list[Candidate]) -> list[Candidate]:
+    """Fitting prefabs passed over for being TOO BIG — over the area ceiling or too tall.
+
+    Deliberately excludes ones rejected for being too SMALL (under MIN_ACCEPTABLE_FRACTION):
+    this list exists to show "the larger one that won't work", so folding the small ones in
+    would make it meaningless.
+    """
+    return [c for c in candidates
+            if c.fits and not c.eligible
+            and (c.too_tall or c.fraction > MAX_AREA_FRACTION)]
+
+
+def _band_distance(fraction: float) -> float:
+    """How far a fraction sits outside the 20-25% band (0 when inside)."""
+    if fraction < TARGET_AREA_FRACTION:
+        return TARGET_AREA_FRACTION - fraction
+    if fraction > MAX_AREA_FRACTION:
+        return fraction - MAX_AREA_FRACTION
+    return 0.0
+
+
 def select_hanger(glass_w_in: float, glass_h_in: float,
                   max_fraction: float = MAX_AREA_FRACTION,
                   target_fraction: float = TARGET_AREA_FRACTION,
@@ -210,7 +249,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         candidates.append(Candidate(
             part=part, width_in=w, height_in=h, area_sq_in=area, fraction=frac,
             fits=fits, too_tall=too_tall,
-            eligible=fits and not too_tall and frac <= max_fraction + 1e-12,
+            eligible=(fits and not too_tall
+                      and MIN_ACCEPTABLE_FRACTION - 1e-12 <= frac <= max_fraction + 1e-12),
             # "In band" always uses the CLIENT's stated 20-25%, never the tunable
             # arguments, so retuning can never relabel a near-miss as in-band.
             in_band=fits and TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION,
@@ -225,7 +265,9 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         fitted_frac = (fitted_w_in * fitted_h_in) / glass_area
         fitted_fits = (fitted_w_in <= max_w + 1e-9 and fitted_h_in <= max_h + 1e-9
                        and fitted_h_in <= height_cap + 1e-9)
-        if fitted_fits and TARGET_AREA_FRACTION <= fitted_frac <= MAX_AREA_FRACTION:
+        # Same acceptance window as prefab eligibility, so a fitted hanger is judged by the
+        # exact standard a candidate would be — including KELLY's real 18.55%.
+        if fitted_fits and MIN_ACCEPTABLE_FRACTION <= fitted_frac <= MAX_AREA_FRACTION:
             return HangerChoice(
                 part=None, fraction=fitted_frac, in_band=True, keep_fitted=True,
                 target_width_in=fitted_w_in, target_height_in=fitted_h_in,
@@ -233,10 +275,9 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                        f"{fitted_frac * 100:.2f}% of the {glass_area:.0f} sq in glass "
                        f"(inside the {TARGET_AREA_FRACTION * 100:.0f}-"
                        f"{MAX_AREA_FRACTION * 100:.0f}% band) — left unchanged",
-                candidates=candidates,
-                rejected_oversize=[c for c in candidates if c.fits and not c.eligible])
+                candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
-    rejected_oversize = [c for c in candidates if c.fits and not c.eligible]
+    rejected_oversize = _rejected_oversize(candidates)
     eligible = [c for c in candidates if c.eligible]
 
     if eligible:
@@ -267,6 +308,13 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         target_area = RESIZE_TARGET_FRACTION * glass_area
         new_h = (target_area / aspect) ** 0.5
         new_w = aspect * new_h
+        # Snap to a clean increment, then verify the rounding did not push it out of the band
+        # (a resized hanger has to be manufactured, so 23.25" beats 23.243").
+        step = RESIZE_ROUND_TO_IN
+        r_w, r_h = round(new_w / step) * step, round(new_h / step) * step
+        if (r_w > 0 and r_h > 0
+                and TARGET_AREA_FRACTION <= (r_w * r_h) / glass_area <= MAX_AREA_FRACTION):
+            new_w, new_h = r_w, r_h
         if new_w <= max_w + 1e-9 and new_h <= min(max_h, height_cap) + 1e-9:
             return HangerChoice(
                 part=None, fraction=(new_w * new_h) / glass_area, in_band=True,
@@ -275,12 +323,14 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                        f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in "
                        f"(aspect {aspect:.2f} kept, "
                        f"{RESIZE_TARGET_FRACTION * 100:.1f}% of the glass)",
-                candidates=candidates,
-                rejected_oversize=[c for c in candidates if c.fits and not c.eligible])
+                candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
-    # Nothing fits under the ceiling. Take the SMALLEST that physically fits (least
-    # oversized) and flag it — unavoidable on a small panel, where any hanger is a large
-    # share of the area.
+    # ── 4. Nothing qualifies, and there is no fitted hanger to resize ─────────
+    # Take the fitting prefab whose area sits CLOSEST to the band. One rule covers both
+    # failure directions: on a tiny panel every prefab is over the ceiling and the SMALLEST is
+    # closest; on a huge panel every prefab is under the target and the LARGEST is closest.
+    # (The previous "smallest that fits" was right only for the first case and picked the very
+    # worst option for the second — a 10%-of-glass hanger on a 60x80 panel.)
     fitting = [c for c in candidates if c.fits]
     if not fitting:
         return HangerChoice(
@@ -288,12 +338,17 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
             reason=f"no prefab fits inside a {glass_w_in:g}x{glass_h_in:g}in glass",
             candidates=candidates, rejected_oversize=rejected_oversize)
 
-    smallest = fitting[0]
+    smallest = min(fitting, key=lambda c: (_band_distance(c.fraction), c.area_sq_in))
+    _above = smallest.fraction > MAX_AREA_FRACTION
     return HangerChoice(
-        part=smallest.part, fraction=smallest.fraction, over_ceiling=True,
+        part=smallest.part, fraction=smallest.fraction,
+        over_ceiling=_above, under_target=not _above,
+        needs_review=smallest.fraction < REVIEW_BELOW_FRACTION,
         target_width_in=smallest.width_in, target_height_in=smallest.height_in,
-        reason=f"every prefab exceeds {max_fraction * 100:.0f}% of the {glass_area:.0f} sq in "
-               f"glass; smallest that fits is #{smallest.part} at {smallest.fraction * 100:.2f}%",
+        reason=f"no prefab lands in the {TARGET_AREA_FRACTION * 100:.0f}-"
+               f"{max_fraction * 100:.0f}% band for the {glass_area:.0f} sq in glass; closest "
+               f"that fits is #{smallest.part} at {smallest.fraction * 100:.2f}% "
+               f"({'above' if _above else 'below'} the band)",
         candidates=candidates, rejected_oversize=rejected_oversize,
     )
 

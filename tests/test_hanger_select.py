@@ -12,8 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from hanger_select import (MAX_AREA_FRACTION, PREFAB_HANGERS, REVIEW_BELOW_FRACTION,
-                           TARGET_AREA_FRACTION, select_hanger, select_hanger_meters)
+from hanger_select import (MAX_AREA_FRACTION, MIN_ACCEPTABLE_FRACTION, PREFAB_HANGERS,
+                           REVIEW_BELOW_FRACTION, TARGET_AREA_FRACTION, select_hanger,
+                           select_hanger_meters)
 
 
 def test_legend_matches_the_client_sheet():
@@ -76,11 +77,19 @@ def test_never_overshoots_the_ceiling_when_something_fits_under_it():
 
 
 def test_picks_the_largest_eligible_not_the_smallest():
+    # 28x26 = 728 sq in puts BOTH #1004 (19.57%) and #1169 (21.43%) inside the acceptance
+    # window, so there is a real choice to get wrong. The larger must win.
+    choice = select_hanger(28, 26)
+    assert set(c.part for c in choice.candidates if c.eligible) == {"1004", "1169"}
+    assert choice.part == "1169"
+
+
+def test_the_acceptance_window_excludes_both_too_small_and_too_big():
+    # On 36x36 only #1038 (23.15%) lands in the window: #1119 and below are under 18%,
+    # #1333 and above are over the 25% ceiling.
     choice = select_hanger(36, 36)
-    eligible = [c.part for c in choice.candidates if c.eligible]
+    assert [c.part for c in choice.candidates if c.eligible] == ["1038"]
     assert choice.part == "1038"
-    # #1119/#1169/#1004/#1417 are all eligible but smaller — the largest must win.
-    assert set(eligible) == {"1417", "1004", "1169", "1119", "1038"}
 
 
 def test_amber_36x36_excludes_1215_on_physical_fit():
@@ -127,7 +136,9 @@ def test_resizes_the_fitted_hanger_when_no_prefab_qualifies():
     choice = select_hanger(12, 12, fitted_w_in=6, fitted_h_in=3)
     assert choice.resize_fitted is True
     assert choice.part is None
-    assert choice.fraction == pytest.approx(0.225)
+    # Aims at the band midpoint, then snaps to a clean 0.25" increment, so the exact fraction
+    # lands near 22.5% rather than on it — what matters is that it stays in band.
+    assert TARGET_AREA_FRACTION <= choice.fraction <= MAX_AREA_FRACTION
 
 
 def test_the_resized_hanger_keeps_its_aspect_ratio():
@@ -140,6 +151,43 @@ def test_the_resized_hanger_lands_inside_the_band():
     choice = select_hanger(12, 12, fitted_w_in=6, fitted_h_in=3)
     frac = (choice.target_width_in * choice.target_height_in) / (12 * 12)
     assert TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION
+
+
+def test_a_prefab_too_far_under_target_is_rejected_in_favour_of_resizing():
+    """Live report (2026-08-03): on a 50x36 glass #1038 was selected at 16.67% because
+    eligibility only required <= 25%. Per the client, a prefab that does not follow the
+    criteria must give way to resizing the existing hanger."""
+    choice = select_hanger(50, 36, fitted_w_in=20, fitted_h_in=15)
+    assert choice.resize_fitted is True
+    assert choice.part is None
+    c1038 = next(c for c in choice.candidates if c.part == "1038")
+    assert c1038.fraction == pytest.approx(300 / 1800)      # 16.67%
+    assert c1038.eligible is False
+
+
+def test_the_lower_bound_keeps_the_two_validated_near_misses():
+    # KELLY's real 18.55% and AMBER's approved 19.79% both sit under the 20% target but
+    # must still qualify — the bound is 18%, between them and the 16.67% failure.
+    assert select_hanger(24, 48).part == "1119"          # 18.55%
+    assert select_hanger(36, 48).part == "1333"          # 19.79%
+    assert MIN_ACCEPTABLE_FRACTION == pytest.approx(0.18)
+
+
+def test_the_resized_hanger_gets_clean_quarter_inch_dims():
+    choice = select_hanger(50, 36, fitted_w_in=20, fitted_h_in=15)
+    assert (choice.target_width_in, choice.target_height_in) == (23.25, 17.5)
+    frac = (23.25 * 17.5) / 1800
+    assert TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION
+
+
+def test_rounding_never_pushes_the_resize_out_of_band():
+    for gw, gh, fw, fh in [(50, 36, 20, 15), (44, 30, 18, 12), (60, 40, 24, 16),
+                           (33, 27, 11, 9), (52, 38, 26, 13)]:
+        c = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
+        if not c.resize_fitted:
+            continue
+        frac = (c.target_width_in * c.target_height_in) / (gw * gh)
+        assert TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION, (gw, gh, frac)
 
 
 def test_a_qualifying_prefab_still_wins_over_resizing():

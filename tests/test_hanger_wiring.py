@@ -147,16 +147,23 @@ async def test_fitted_hanger_already_in_band_is_kept_untouched(rules_dir):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_in", [30, 40, 48, 54, 60, 72])
-async def test_every_hanger_write_is_an_exact_catalogue_size(rules_dir, target_in):
-    from hanger_select import PREFAB_HANGERS
+async def test_every_hanger_write_is_a_catalogue_or_clean_custom_size(rules_dir, target_in):
+    """A prefab write must be an EXACT catalogue size. When no prefab qualifies and the fitted
+    hanger is resized instead, the value is computed — but must still be a clean 0.25"
+    increment, since someone has to make that part."""
+    from hanger_select import PREFAB_HANGERS, RESIZE_ROUND_TO_IN
     widths = {round(w, 4) for _p, w, _h in PREFAB_HANGERS}
     heights = {round(h, 4) for _p, _w, h in PREFAB_HANGERS}
     res = await _resize(rules_dir, MIRROR_H, target_in)
+    resized = res.hanger is not None and res.hanger.resize_fitted
     for c in res.changes:
-        if c.name == HANGER_W:
-            assert round(c.value_meters / IN, 4) in widths
-        if c.name == HANGER_H:
-            assert round(c.value_meters / IN, 4) in heights
+        if c.name not in (HANGER_W, HANGER_H):
+            continue
+        inches = round(c.value_meters / IN, 4)
+        if resized:
+            assert abs(inches / RESIZE_ROUND_TO_IN - round(inches / RESIZE_ROUND_TO_IN)) < 1e-6
+        else:
+            assert inches in (widths if c.name == HANGER_W else heights)
 
 
 # ── the chassis HANGING TAB must follow the hanger width ─────────────────────

@@ -1,0 +1,20 @@
+# Supabase CLI project for the Lumi Design AI engine.
+#
+# This folder is DEV-ONLY and is never shipped: build-release.ps1 copies just the engine exe,
+# the generated config and rules-seed\. The engine talks to Supabase over the REST API, so it
+# needs no CLI, no driver and no database credentials on a client machine.
+#
+# Usage:
+#   supabase link --project-ref <ref>      # once, on your machine
+#   supabase db push                       # apply migrations/ to the hosted project
+#   supabase migration new <name>          # start a new migration
+#
+# Without the CLI, paste migrations/*.sql into the project's SQL editor in order.
+
+project_id = "lumi-design-ai"
+
+[db]
+major_version = 15
+
+[db.migrations]
+schema_paths = []

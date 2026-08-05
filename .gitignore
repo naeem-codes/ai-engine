@@ -3,6 +3,10 @@
 .env.local
 .env.*.local
 
+# Build-time baked config (API key + per-client token) — written by build-release.ps1.
+# MUST never be committed: it is generated per build and contains live credentials.
+_baked.py
+
 # Virtual environment
 .venv/
 .venv310/

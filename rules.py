@@ -4,6 +4,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from log import log
+from resize_policy import filter_axis_dims, pick_master
+
 # Resolve rules/ next to engine.exe when frozen (PyInstaller), else next to this file.
 if getattr(sys, "frozen", False):
     RULES_DIR = Path(sys.executable).parent / "rules"
@@ -75,13 +78,24 @@ class ModelRules:
 
 
 def load_rules(model_path: str | None) -> ModelRules | None:
+    """Read the rules file sitting at the legacy per-stem path.
+
+    Kept for the pre-family layout (and for an install whose data dir has not been
+    bootstrapped yet). The live path is `rules_store.select_for_model` → `parse_rules`.
+    """
     if not model_path:
         return None
     stem = Path(model_path).stem
     candidate = RULES_DIR / f"{stem}.rules.json"
     if not candidate.exists():
         return None
-    data = json.loads(candidate.read_text())
+    return parse_rules(json.loads(candidate.read_text()), stem)
+
+
+def parse_rules(data: dict | None, stem: str = "") -> ModelRules | None:
+    """Build ModelRules from an already-loaded rules document."""
+    if not data:
+        return None
 
     # Must be new format (has "width" or "height" keys)
     if "width" not in data and "height" not in data:
@@ -134,6 +148,53 @@ def load_rules(model_path: str | None) -> ModelRules | None:
         offset=parse_offsets(data.get("offset", [])),
         component_labels=component_labels,
     )
+
+
+def derive_rules(dimensions, labels: dict[str, str] | None,
+                 master_width_dim: str | None, master_height_dim: str | None,
+                 model: str = "(derived)") -> ModelRules | None:
+    """Synthesise a rule set from the app's axis labels + resize_policy, storing nothing.
+
+    Why this can exist at all: `generate_rules` already DISCARDS the LLM's grouping and
+    rebuilds axis membership from the app's [W]/[H] labels, then narrows it with the policy.
+    That half of a rules file is therefore a cached computation, not authored data — labels
+    arrive fresh from the live model on every Refresh and the policy is code. So the same
+    membership can be produced on demand for a model nobody has generated rules for.
+
+    Used as the LAST tier, never as an override: a stored set whose masters exist always
+    wins. The reason is the review gate — the rules dialog is where a bad label gets caught
+    before it touches the model, and the labeler has produced bad labels (a square part
+    tagged [W] on both axes; the `(filled)` fallback tagging a mate dim [W]). Deriving skips
+    that gate, so it only ever replaces the WEAKER fallback it displaces: the LLM
+    classification path, which has neither labels-as-authority nor policy narrowing.
+
+    Carries membership only. Everything authored — limits, component_labels, pattern_rules,
+    offset links, position rules — is absent by construction and comes from the family's
+    stored set when there is one.
+    """
+    labels = labels or {}
+    values = {d.name: d.value_meters for d in dimensions}
+    pairs: dict[str, list[RulePairEntry]] = {}
+    for axis, tag, app_master in (("width", "W", master_width_dim),
+                                  ("height", "H", master_height_dim)):
+        labeled = [d.name for d in dimensions if labels.get(d.name) == tag]
+        allowed, blocked = filter_axis_dims(labeled, axis, None, values)
+        master, note = pick_master(allowed, app_master, None)
+        log(f"  [DERIVE] {axis}: {len(allowed)}/{len(labeled)} dim(s) after policy, "
+            f"master={master or '(none)'} [{note}]")
+        for name, reason in blocked:
+            log(f"  [DERIVE] {axis} BLOCK {name} — {reason}")
+        if not master or not allowed:
+            pairs[axis] = []
+            continue
+        pairs[axis] = [RulePairEntry(if_changes=master,
+                                     also_change=[d for d in allowed if d != master])]
+
+    if not pairs["width"] and not pairs["height"]:
+        log("  [DERIVE] no usable axis — cannot derive a rule set")
+        return None
+    return ModelRules(model=model, limits=None,
+                      width=pairs["width"], height=pairs["height"])
 
 
 def get_triggers(model_rules: ModelRules) -> list[str]:

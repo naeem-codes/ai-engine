@@ -1,10 +1,12 @@
 import json
 import hanger_select
 import resize_policy as policy
+import rules_store as store
 from hanger_select import select_hanger_meters
 from models import (InterpretRequest, DimensionChange, HangerSelection,
                     InterpretResponse)
-from rules import load_rules, validate, expand_positions, expand_offsets
+from rules import (load_rules, parse_rules, derive_rules, validate,
+                   expand_positions, expand_offsets)
 from llm import call_llm
 from prompts import classification_prompt, rules_dependent_prompt
 from log import log, section
@@ -281,6 +283,42 @@ def _hanger_note(hanger: HangerSelection | None,
     return note
 
 
+def _overall_membership(req: InterpretRequest, axis: str, app_master: str | None,
+                        llm_dims: list[str]) -> tuple[list[str], str]:
+    """Axis membership for an OVERALL resize, taken from labels + policy, not from the LLM.
+
+    Only for OVERALL scope — the request named no component, so "every dim on this axis that
+    policy allows" IS the answer, and the app's labeler already knows which those are.
+    CONNECTED/SINGLE are left entirely alone: their dim lists encode a mate traversal or an
+    explicit restriction that labels cannot express.
+
+    Why override at all: `generate_rules` deliberately discards the LLM's grouping for exactly
+    this reason — its position heuristic drops on-axis dims (only one chassis [H] dim captured,
+    so the frame under-grows) and drags a vertical LED strip's [H] length into the width set.
+    The stored-rules path has been immune since axis enforcement landed; this branch, used by
+    every model without a stored rule set, still trusted the model. Now it doesn't.
+
+    Returns (dims, note_for_the_log). Falls back to the LLM's list if nothing is labeled.
+    """
+    derived = derive_rules(req.dimensions, req.dim_axis_labels,
+                           req.master_width_dim, req.master_height_dim)
+    pairs = (derived.width if axis == "width" else derived.height) if derived else []
+    if not pairs:
+        return llm_dims, "no labeled membership available — kept the AI's list"
+    member = [pairs[0].if_changes] + list(pairs[0].also_change)
+    if app_master and app_master not in member:
+        member.insert(0, app_master)
+    added = [d for d in member if d not in llm_dims]
+    dropped = [d for d in llm_dims if d not in member]
+    note = f"{len(member)} labeled dim(s)"
+    if added:
+        note += f"; added {len(added)} the AI missed: {', '.join(added[:3])}"
+    if dropped:
+        note += f"; dropped {len(dropped)} not labeled [{'W' if axis == 'width' else 'H'}] " \
+                f"or blocked by policy: {', '.join(dropped[:3])}"
+    return member, note
+
+
 def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
                     component_labels: dict[str, str] | None,
                     axis_hint: str = "",
@@ -347,8 +385,20 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             for d in large_dims
         ) or "  (no dimensions >= 50 mm found)"
 
-        # Rules file exists → always use rules_dependent_prompt, ignore keywords
-        model_rules = load_rules(req.model_path)
+        # ── Which rule set applies? Three tiers, strongest first ───────────────
+        # 1. a stored set for this model's FAMILY (or an exact-stem file) — authored and
+        #    human-reviewed, so it wins whenever its masters exist in the live model;
+        # 2. the legacy per-stem path, for an install whose data dir has not bootstrapped;
+        # 3. derived from the app's labels + resize_policy — no storage, no review gate, but
+        #    strictly better than the tier it displaces (LLM classification).
+        live_dims = [d.name for d in req.dimensions]
+        selection = store.select_for_model(req.model_path, live_dims)
+        model_rules = parse_rules(selection.doc, store.stem_of(req.model_path))
+        rules_note = selection.warning
+        if model_rules is None:
+            model_rules = load_rules(req.model_path)
+            if model_rules is not None:
+                log("  [STORE] using the legacy per-stem rules path")
         if model_rules is not None:
             rules_json = json.dumps({
                 "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
@@ -494,6 +544,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
             if dropped:
                 explanation += f" (left unchanged: {len(dropped)} fixed-size dim(s))"
+            # Coverage gap / derived-membership notice. Previously silent: an unmatched dep was
+            # skipped with only an engine-log line, so an under-grown frame looked like a bug.
+            explanation += rules_note
 
             # Frost band before the hanger: it follows the LED strip, which is already in
             # `changes`, and it must not be confused with the hanger's own followers.
@@ -569,6 +622,11 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         target_w = data.get("target_width_meters")
         master_w = data.get("master_width_dim") or req.master_width_dim
         width_dims: list[str] = data.get("width_dims") or []
+        # No master in the response ⇒ OVERALL scope (the prompt only asks for one on
+        # CONNECTED), so labels + policy decide membership rather than the model's list.
+        if not data.get("master_width_dim") and width_dims:
+            width_dims, note = _overall_membership(req, "width", master_w, width_dims)
+            log(f"  [OVERALL] width membership from labels — {note}")
         log(f"  target_w={target_w}  master_w={master_w!r}  width_dims={width_dims}")
         if target_w and master_w and width_dims:
             master_current = dims_by_name.get(master_w, 0.0)
@@ -598,6 +656,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         target_h = data.get("target_height_meters")
         master_h = data.get("master_height_dim") or req.master_height_dim
         height_dims: list[str] = data.get("height_dims") or []
+        if not data.get("master_height_dim") and height_dims:
+            height_dims, note = _overall_membership(req, "height", master_h, height_dims)
+            log(f"  [OVERALL] height membership from labels — {note}")
         log(f"  target_h={target_h}  master_h={master_h!r}  height_dims={height_dims}")
         if target_h and master_h and height_dims:
             master_current = dims_by_name.get(master_h, 0.0)
