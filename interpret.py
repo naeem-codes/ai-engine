@@ -1,4 +1,5 @@
 import json
+import chassis_slots
 import hanger_select
 import resize_policy as policy
 import rules_store as store
@@ -139,14 +140,41 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         keep_fitted=choice.keep_fitted, resize_fitted=choice.resize_fitted,
         reason=choice.reason, width_dim=w_dim or "", height_dim=h_dim or "",
     )
+    def finish(out: list[DimensionChange]) -> tuple[list[DimensionChange], HangerSelection]:
+        """Append the chassis HANGING TAB follower, then return.
+
+        Every exit goes through here, including the ones where the hanger itself does not move.
+        The tabs have to sit on the hanger's slots or they do not seat, and a resize on a model
+        whose tabs were ALREADY misaligned used to leave them misaligned — the follower was
+        gated behind the hanger changing, and `keep_fitted` returned before it entirely
+        (reported 2026-08-06). Every resize now re-asserts the 4.25" inset; a write that comes
+        out identical is dropped, so a healthy model still reports no change.
+        """
+        if not w_dim:
+            return out, sel
+        old_w = current.get(w_dim, 0.0)
+        if old_w <= 0:
+            return out, sel
+        # The hanger width AFTER this turn — unchanged unless we are writing it.
+        new_w = next((c.value_meters for c in out if c.name == w_dim), old_w)
+        for dim, new_val, inset_in in _hanger_follower_updates(req, old_w, new_w - old_w):
+            if abs(new_val - current.get(dim, 0.0)) < 1e-9:
+                continue              # already correct — nothing to write
+            out.append(DimensionChange(name=dim, value_meters=new_val))
+            sel.follower_dims.append(dim)
+            log(f"  [HANGER] follower {dim}: {current[dim] / 0.0254:.3f}\" → "
+                f"{new_val / 0.0254:.3f}\" (holds the "
+                f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" inset from the hanger width)")
+        return out, sel
+
     if choice.keep_fitted:
         # A bespoke hanger the client made for this product, already in band — do not swap it
         # for a catalogue part (this is what wrongly replaced JEN's 30x15 with a 12x40).
-        return [], sel
+        return finish([])
     if not choice.part and not choice.resize_fitted:
         # Nothing in the matrix fits and there is no fitted hanger to fall back on.
         log("  [HANGER] no prefab fits — hanger left unchanged (no new hangers by policy)")
-        return [], sel
+        return finish([])
 
     out: list[DimensionChange] = []
     for dim, target in ((w_dim, choice.target_width_m), (h_dim, choice.target_height_m)):
@@ -157,22 +185,7 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         out.append(DimensionChange(name=dim, value_meters=target))
     if not out:
         log(f"  [HANGER] #{choice.part} already fitted at the correct size — no change")
-        return out, sel
-
-    # The chassis HANGING TAB spacing has to follow the hanger width or the tabs stop
-    # seating in the hanger's slots. Follow by the width DELTA, which preserves whatever
-    # constant inset the aligned model already has (nothing hard-coded).
-    if w_dim:
-        old_w = current.get(w_dim, 0.0)
-        delta = choice.target_width_m - old_w
-        if old_w > 0 and abs(delta) > 1e-6:
-            for dim, new_val, inset_in in _hanger_follower_updates(req, old_w, delta):
-                out.append(DimensionChange(name=dim, value_meters=new_val))
-                sel.follower_dims.append(dim)
-                log(f"  [HANGER] follower {dim}: {current[dim] / 0.0254:.3f}\" → "
-                    f"{new_val / 0.0254:.3f}\" (holds the {inset_in:.3f}\" inset from the "
-                    f"hanger width)")
-    return out, sel
+    return finish(out)
 
 
 def _frost_follower_updates(req: InterpretRequest, changes: list[DimensionChange],
@@ -227,6 +240,201 @@ def _frost_follower_updates(req: InterpretRequest, changes: list[DimensionChange
     return out
 
 
+def _clip_tab_alignment(hanger, changes: list[DimensionChange]) -> float | None:
+    """Where the chassis hanging tabs ended up, as a distance from the centre plane.
+
+    A clip carries the glass at the point the chassis is actually supported, so lining the two
+    up puts the clip on the load path instead of somewhere arbitrary. The client's own products
+    already do this to within ~1-2": tabs vs clips are ±17.87/±18.50 on the 60", ±12.88/±14.00 on
+    the 48", ±5.00/±4.00 on CAROL. Requested 2026-08-06 ("we can make the Hanger Tabs and Clips
+    parallel to each other").
+
+    Returns half the tab spacing, or None when the tabs did not move this turn.
+    """
+    if hanger is None or not getattr(hanger, "follower_dims", None):
+        return None
+    applied = {c.name: c.value_meters for c in changes}
+    for dim in hanger.follower_dims:
+        if dim in applied:
+            return applied[dim] / 2.0
+    return None
+
+
+def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange],
+                           hanger=None) -> list[tuple[str, float, float, str]]:
+    """Carry absolute-position mates inward when the glass shrinks (and outward when it grows).
+
+    A component pinned a fixed distance from the assembly CENTRE plane does not move when the
+    glass resizes, so the edge moves past it: AMBER's mirror clip sits 18.500" from centre, 11.5"
+    inside a 60" glass but 0.5" OUTSIDE a 36" one, leaving the clip hanging off the mirror.
+
+    The centre plane does not move and each edge moves by HALF the width change, so shifting the
+    mate by half the master delta preserves the component's distance from the edge — the same
+    constant-offset invariant the rest of the resize uses. On the real AMBER that turns 18.500"
+    into 6.500", within half an inch of the 6.000" the client's own 36x36 carries.
+
+    ⚠️ Writing a mate is normally FORBIDDEN — mates are positions, and a size delta applied to one
+    once shifted SUZI's chassis 6" ([[project_mate_dims_never_resized]]). This is a deliberate,
+    narrow exception: only mates the app has confirmed are measured against an ASSEMBLY plane, only
+    on the axis whose master actually moved, and only by half that master's delta.
+
+    Returns (dim_name, new_value_meters, current_value_meters, component).
+    """
+    if not req.mate_positions:
+        return []
+
+    applied = {c.name: c.value_meters for c in changes}
+    current = {d.name: d.value_meters for d in req.dimensions}
+
+    # Half the master's movement on each axis — the distance that axis's edges travelled.
+    half_delta: dict[str, float] = {}
+    for axis, master in (("W", req.master_width_dim), ("H", req.master_height_dim)):
+        if master and master in applied and master in current:
+            delta = applied[master] - current[master]
+            if abs(delta) > 1e-9:
+                half_delta[axis] = delta / 2.0
+
+    if not half_delta:
+        return []
+
+    # The MASTER's own component must never be moved by its own resize. The real AMBER carries
+    # `Distance7 = 6.000" [assembly plane <-> 1011-MIRROR-CAROL-1]`, so the glass itself is pinned
+    # to an assembly plane; shifting that would slide the master and desynchronise everything
+    # measured from it. (Today that mate resolves to no axis and is dropped upstream — this does
+    # not rely on that staying true.)
+    master_comps = {
+        name[name.index("[") + 1:name.rindex("]")]
+        for name in (req.master_width_dim, req.master_height_dim)
+        if name and "[" in name and "]" in name
+    }
+
+    out: list[tuple[str, float, float, str]] = []
+    seen: set[str] = set()
+    for mate in req.mate_positions:
+        shift = half_delta.get(mate.axis)
+        if shift is None:
+            continue
+        if mate.dim in applied or mate.dim in seen:
+            continue          # already being written — never shift a value twice
+        if mate.component in master_comps:
+            log(f"  [MATE] {mate.dim} SKIPPED — holds the master component {mate.component}")
+            continue
+        seen.add(mate.dim)
+
+        base = current.get(mate.dim, mate.value_meters)
+        new_val = base + shift
+
+        # A clip lines up with the hanging tabs when those moved — same load path, and it
+        # replaces the edge offset rather than adjusting it.
+        tab_half = _clip_tab_alignment(hanger, changes) if mate.axis == "W" else None
+        if tab_half and policy.is_clip(mate.component):
+            log(f"  [MATE] {mate.dim} aligned to the hanging tabs at "
+                f"{tab_half / 0.0254:.3f}\" (was heading for {new_val / 0.0254:.3f}\")")
+            new_val = tab_half
+
+        floor = _mate_position_floor(mate, applied, current, req)
+        if floor > new_val:
+            log(f"  [MATE] {mate.dim} floor {floor / 0.0254:.3f}\" applied — holding the edge "
+                f"offset would have put {mate.component} at {new_val / 0.0254:.3f}\", too close "
+                f"to the centre")
+            new_val = floor
+        if new_val <= 0:
+            log(f"  [MATE] {mate.dim} SKIPPED — would go to {new_val * 1000:.2f} mm")
+            continue
+        log(f"  [MATE] {mate.dim} holds {mate.component} on {mate.axis}: "
+            f"{base / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" "
+            f"(half the {shift * 2 / 0.0254:+.3f}\" master change, keeping its distance "
+            f"from the edge)")
+        out.append((mate.dim, new_val, base, mate.component))
+    return out
+
+
+def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, float],
+                         req: InterpretRequest) -> float:
+    """How close to the centre a positioned component may be pushed.
+
+    Holding a constant distance from the EDGE is right until the mirror gets narrow, and then it
+    collapses: AMBER's clip, 11.5" in from the edge of a 60" glass, lands 0.5" from the centre of a
+    24" one — where the two mirrored clips OVERLAP each other (seen live, 60x36 -> 24x36).
+
+    Two floors, whichever is higher:
+
+    1. **master / 6**, taken from the client's own narrow products, where it is EXACT:
+       CAROL 24x36 puts the clip centre at 4.000" = 24/6, and AMBER 36x36 at 6.000" = 36/6. Their
+       wider products do not follow it (48 -> 14.000", 60 -> 18.500", i.e. edge insets of 8/12/10/
+       11.5" with no single rule), so this is used only as a FLOOR — the edge offset still governs
+       wherever it gives the larger value, which is every width the client draws by hand.
+    2. **half the component's own width plus 1/4"**, a hard geometric guarantee that a mirrored
+       pair can never intersect at the centreline even if the ratio above is ever retuned.
+    """
+    master = req.master_width_dim if mate.axis == "W" else req.master_height_dim
+    if not master:
+        return 0.0
+    master_new = applied.get(master, current.get(master, 0.0))
+
+    proportional = master_new / 6.0 if master_new > 0 else 0.0
+    no_overlap = mate.extent_meters / 2.0 + 0.25 * 0.0254 if mate.extent_meters > 0 else 0.0
+    return max(proportional, no_overlap)
+
+
+def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange],
+                           ) -> list[tuple[str, float, float]]:
+    """Shorten the chassis mounting slots when the chassis gets too narrow to hold them.
+
+    Four slots at their drawn 7.78" no longer fit below roughly a 39" chassis: `Cut-Extrude4`
+    fails with `swSketchErrorExtRefFail` and the whole resize aborts. Shortening them is what
+    makes 60" -> 36" build (measured live; see `chassis_slots`).
+
+    Only fires when the chassis WIDTH itself moved this turn, and only shortens — a width where
+    the stock length still fits returns nothing, so growing a mirror never disturbs slots the
+    client drew deliberately.
+
+    Returns (dim_name, new_value_meters, current_value_meters).
+    """
+    current = {d.name: d.value_meters for d in req.dimensions}
+    out: list[tuple[str, float, float]] = []
+    seen: set[str] = set()
+    if not req.slot_rows:
+        return out
+
+    for change in changes:
+        if (req.dim_axis_labels or {}).get(change.name) != "W":
+            continue
+        comp = change.name[change.name.index("[") + 1:change.name.rindex("]")] \
+            if "[" in change.name and "]" in change.name else ""
+
+        for row in req.slot_rows:
+            if row.component != comp:
+                continue                    # the row lives on a different part
+            if row.dim == change.name:
+                continue                    # the slot dim itself is not a trigger
+            if row.dim in seen or row.dim not in current:
+                continue
+
+            spec = chassis_slots.spec_from_measurement(row)
+            if spec is None:
+                continue
+            seen.add(row.dim)
+
+            # The part's new width: it shrinks by the same amount its driving dim does.
+            old_driver = current.get(change.name, 0.0)
+            if old_driver <= 0:
+                continue
+            new_part_w_in = (row.part_width_meters + (change.value_meters - old_driver)) / 0.0254
+
+            target_in = chassis_slots.slot_length_for(new_part_w_in, spec)
+            for line in chassis_slots.log_lines(new_part_w_in, spec, target_in,
+                                                current[row.dim] / 0.0254):
+                log("  " + line)
+            if target_in is None:
+                continue
+            new_val = target_in * 0.0254
+            if abs(new_val - current[row.dim]) < 1e-9:
+                continue
+            out.append((row.dim, new_val, current[row.dim]))
+    return out
+
+
 def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
                              ) -> list[tuple[str, float, float]]:
     """Chassis dims that track the hanger width, shifted by the hanger's width delta.
@@ -236,23 +444,46 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
     the name hint matched the wrong dim, and writing it would deform the chassis.
     """
     updates: list[tuple[str, float, float]] = []
+    seen: set[str] = set()
     for d in req.dimensions:
         upper = d.name.upper()
         if not any(hint in upper for hint in hanger_select.HANGER_FOLLOWER_HINTS):
             continue
         if policy.is_hanger(d.name, None):
             continue                      # the hanger's own dims are handled above
+        if d.name in seen:
+            continue                      # the dim dump lists every dim twice
+        seen.add(d.name)
         inset_m = old_hanger_w - d.value_meters
         inset_in = inset_m / 0.0254
         if abs(inset_in - hanger_select.EXPECTED_TAB_INSET_IN) > hanger_select.EXPECTED_TAB_INSET_TOL_IN:
             log(f"  [HANGER] follower candidate {d.name} SKIPPED — sits {inset_in:.3f}\" "
                 f"from the hanger width, not the expected "
-                f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\"; likely not the tab spacing")
+                f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\". Either it is not the tab spacing, "
+                f"or this model's tabs are already misaligned by more than "
+                f"{hanger_select.EXPECTED_TAB_INSET_TOL_IN:.2f}\" — check it in SolidWorks")
             continue
-        new_val = d.value_meters + delta
+
+        # Write the CANONICAL inset rather than carrying the current one forward.
+        #
+        # This used to be `d.value_meters + delta`, which preserved whatever inset the model
+        # happened to have. That is why resizing a model whose tabs were ALREADY misaligned left
+        # them just as misaligned afterwards (reported 2026-08-06): any inset inside the +/-1"
+        # identification window was faithfully carried through instead of corrected.
+        #
+        # Writing 4.25" outright is now safe because it is confirmed on all FOUR client products,
+        # not the two it was derived from: 14.25 -> 10.000, 20 -> 15.750, 30 -> 25.750,
+        # 40 -> 35.740. The tolerance above still decides WHICH dim this is; it no longer decides
+        # the value. On an already-aligned model the result is identical.
+        new_hanger_w = old_hanger_w + delta
+        new_val = new_hanger_w - hanger_select.EXPECTED_TAB_INSET_IN * 0.0254
         if new_val <= 0:
             log(f"  [HANGER] follower {d.name} SKIPPED — would go to {new_val * 1000:.2f} mm")
             continue
+        drift_in = abs(inset_in - hanger_select.EXPECTED_TAB_INSET_IN)
+        if drift_in > 0.005:
+            log(f"  [HANGER] follower {d.name} inset CORRECTED from {inset_in:.3f}\" to "
+                f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" (was drifted by {drift_in:.3f}\")")
         updates.append((d.name, new_val, inset_in))
     return updates
 
@@ -317,6 +548,83 @@ def _overall_membership(req: InterpretRequest, axis: str, app_master: str | None
         note += f"; dropped {len(dropped)} not labeled [{'W' if axis == 'width' else 'H'}] " \
                 f"or blocked by policy: {', '.join(dropped[:3])}"
     return member, note
+
+
+def _expand_master(master: str, value_meters: float, also_change: list[str],
+                   current_dims: dict[str, float]) -> list[DimensionChange]:
+    """One master dim plus its dependents, each moved by the master's CONSTANT OFFSET."""
+    master_current = current_dims.get(master, 0.0)
+    out = [DimensionChange(name=master, value_meters=value_meters)]
+    for dep in also_change:
+        if dep == master:
+            continue
+        if policy.is_mate_dim(dep):
+            # A stale rules file (or a hand-added dep) can still list a mate; a size
+            # delta on a mate MOVES the component instead of resizing it.
+            log(f"    SKIP {dep!r} — {policy.MATE_DIM_REASON}")
+            continue
+        current = current_dims.get(dep)
+        if current is None:
+            log(f"    SKIP {dep!r} — not in dims")
+            continue
+        new_val = _dependent_value(current, master_current, value_meters)
+        if new_val is None:
+            log(f"    SKIP {dep!r} — {current / master_current:.1%} of the master: a "
+                f"fixed profile, not a frame-spanning dim (left at "
+                f"{current / 0.0254:.3f}\")")
+            continue
+        if new_val <= 0:
+            log(f"    SKIP {dep!r} — constant offset would give {new_val*1000:.2f} mm")
+            continue
+        out.append(DimensionChange(name=dep, value_meters=new_val))
+    return out
+
+
+def _second_axis_changes(data: dict, scope: str, primary_dim: str, model_rules,
+                         req: InterpretRequest, current_dims: dict[str, float],
+                         ) -> tuple[list[DimensionChange], str]:
+    """The OTHER axis of a "24 x 36" request.
+
+    The response schema carries a single rule, so a two-number request could only ever move one
+    axis. `other_axis_meters` carries the second value; which axis it belongs to is decided HERE,
+    not by the LLM — it is simply whichever master the primary is not, and the rule comes from
+    this model's own rules file. That keeps the LLM's job to reading two numbers off the prompt.
+
+    Returns (changes, note) — the note explains a no-op so the chat never claims something moved
+    that did not.
+    """
+    raw = data.get("other_axis_meters")
+    if raw in (None, "") or scope != "overall":
+        return [], ""
+    try:
+        other_value = float(raw)
+    except (TypeError, ValueError):
+        log(f"  [2-AXIS] ignored unparseable other_axis_meters={raw!r}")
+        return [], ""
+    if other_value <= 0:
+        return [], ""
+
+    on_width = primary_dim == req.master_width_dim
+    other_master = req.master_height_dim if on_width else req.master_width_dim
+    other_rules = model_rules.height if on_width else model_rules.width
+    other_label = "height" if on_width else "width"
+    if not other_master:
+        log(f"  [2-AXIS] no master for the {other_label} — skipped")
+        return [], ""
+    if other_master == primary_dim:
+        return [], ""
+
+    current = current_dims.get(other_master)
+    if current is not None and abs(current - other_value) < 1e-6:
+        log(f"  [2-AXIS] {other_label} already {other_value / 0.0254:.3f}\" — nothing to change")
+        return [], (f" The {other_label} is already {other_value / 0.0254:.0f}\", so only the "
+                    f"{'width' if on_width else 'height'} changed.")
+
+    rule = next((r for r in other_rules if r.if_changes == other_master), None)
+    deps = list(rule.also_change) if rule is not None else []
+    log(f"  [2-AXIS] also setting the {other_label} master {other_master!r} → "
+        f"{other_value / 0.0254:.3f}\" with {len(deps)} dependent(s)")
+    return _expand_master(other_master, other_value, deps, current_dims), ""
 
 
 def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
@@ -477,30 +785,16 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 return InterpretResponse(error=limit_error)
 
             current_dims = {d.name: d.value_meters for d in req.dimensions}
-            master_current = current_dims.get(if_changes, 0.0)
-            changes = [DimensionChange(name=if_changes, value_meters=value_meters)]
-            for dep in also_change:
-                if dep == if_changes:
-                    continue
-                if policy.is_mate_dim(dep):
-                    # A stale rules file (or a hand-added dep) can still list a mate; a size
-                    # delta on a mate MOVES the component instead of resizing it.
-                    log(f"    SKIP {dep!r} — {policy.MATE_DIM_REASON}")
-                    continue
-                current = current_dims.get(dep)
-                if current is None:
-                    log(f"    SKIP {dep!r} — not in dims")
-                    continue
-                new_val = _dependent_value(current, master_current, value_meters)
-                if new_val is None:
-                    log(f"    SKIP {dep!r} — {current / master_current:.1%} of the master: a "
-                        f"fixed profile, not a frame-spanning dim (left at "
-                        f"{current / 0.0254:.3f}\")")
-                    continue
-                if new_val <= 0:
-                    log(f"    SKIP {dep!r} — constant offset would give {new_val*1000:.2f} mm")
-                    continue
-                changes.append(DimensionChange(name=dep, value_meters=new_val))
+            changes = _expand_master(if_changes, value_meters, also_change, current_dims)
+
+            # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this
+            # the other axis was silently dropped and the explanation told the user to submit it
+            # separately (seen live: "change to 24.00 X 36.00" resized width only; it looked right
+            # only because the height already happened to be 36").
+            second, second_note = _second_axis_changes(
+                data, scope, if_changes, model_rules, req, current_dims)
+            changes.extend(second)
+            rules_note += second_note
 
             # Position rules: shift distance-mate offsets so components hold a constant
             # gap from a moving edge. Applied AFTER proportional scaling, and override
@@ -559,9 +853,29 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 explanation += (f" Frosted band followed the LED strip to "
                                 f"{frost[0][1] / 0.0254:.3f}\".")
 
+            # Slots before the hanger: this reads the chassis width that the rules just set, and
+            # must be in `changes` before the app's inside-out ordering sequences the batch.
+            slots = _slot_follower_updates(req, changes)
+            for dim, new_val, old_val in slots:
+                changes.append(DimensionChange(name=dim, value_meters=new_val))
+            if slots:
+                explanation += (f" Chassis mounting slots shortened to "
+                                f"{slots[0][1] / 0.0254:.3f}\" so they still fit the narrower "
+                                f"chassis.")
+
             hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
             changes.extend(hanger_changes)
             explanation += _hanger_note(hanger, hanger_changes)
+
+            # Last, so it sees every size change already decided and never double-shifts a dim
+            # another step is writing.
+            mates = _mate_position_updates(req, changes, hanger)
+            for dim, new_val, _old, comp in mates:
+                changes.append(DimensionChange(name=dim, value_meters=new_val))
+            if mates:
+                explanation += (f" Moved {len(mates)} positioned component(s) "
+                                f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same "
+                                f"distance from the edge.")
 
             _log_changes("CASE 2 rules changes", changes)
             return InterpretResponse(changes=changes, explanation=explanation, hanger=hanger)
@@ -710,9 +1024,26 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             explanation = (explanation or "") + (
                 f" Frosted band followed the LED strip to {frost[0][1] / 0.0254:.3f}\".")
 
+        slots = _slot_follower_updates(req, changes)
+        for dim, new_val, old_val in slots:
+            changes.append(DimensionChange(name=dim, value_meters=new_val))
+        if slots:
+            explanation = (explanation or "") + (
+                f" Chassis mounting slots shortened to {slots[0][1] / 0.0254:.3f}\" so they "
+                f"still fit the narrower chassis.")
+
         hanger_changes, hanger = _hanger_changes(req, changes, None)
         changes.extend(hanger_changes)
         explanation = (explanation or "") + _hanger_note(hanger, hanger_changes)
+
+        mates = _mate_position_updates(req, changes, hanger)
+        for dim, new_val, _old, comp in mates:
+            changes.append(DimensionChange(name=dim, value_meters=new_val))
+        if mates:
+            explanation = (explanation or "") + (
+                f" Moved {len(mates)} positioned component(s) "
+                f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same distance "
+                f"from the edge.")
 
         _log_changes("CASE 2 OVERALL/CONNECTED final changes", changes)
         return InterpretResponse(changes=changes, explanation=explanation, hanger=hanger)

@@ -24,6 +24,13 @@ OVERALL SIZE CHANGE — THE MOST COMMON REQUEST (e.g. "change width to 40",
     "D1@WIDTH [LPM-...]" is one small component's own width (often only 2-3 inches) — it is
     NOT the overall width. Choosing it would set a tiny part to 40" and blow up the assembly.
 
+BOTH AXES IN ONE REQUEST ("24 x 36", "resize to 40 x 30", "make it 24 wide and 36 tall"):
+  - The FIRST number is the WIDTH and the SECOND is the HEIGHT, unless the user says otherwise.
+  - Set "if_changes"/"value_meters" for the WIDTH exactly as above, with "scope": "overall".
+  - ALSO set "other_axis_meters" to the HEIGHT in metres. Both are applied in one go.
+  - NEVER tell the user to submit the second number as a separate request — it is handled here.
+    Say plainly that both the width and the height are being set.
+
 HOW TO MATCH THE RULE (only when the user NAMES a specific component):
   1. The user names a component in plain English (e.g. "Right LED power supply").
   2. Use the COMPONENT NAMES map above to find that component's id (e.g. "LPM-24096A-2").
@@ -64,6 +71,7 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
   }},
   "scope": "overall",
   "value_meters": 1.0668,
+  "other_axis_meters": 0.9144,
   "explanation": "one sentence"
 }}
 
@@ -71,6 +79,8 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
   master dim); omit it (or "") for a named-component change
 - Copy if_changes and also_change EXACTLY from the rules JSON above
 - value_meters must be a positive number in meters
+- "other_axis_meters": ONLY for a two-number "W x H" request — the HEIGHT in metres when
+  if_changes is the width master. OMIT it entirely for a single-axis request.
 - 1 inch = 0.0254 m  |  1 mm = 0.001 m  |  1 foot = 0.3048 m
 - If unclear: {{"error": "what is unclear"}}"""
 

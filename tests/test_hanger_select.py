@@ -12,9 +12,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from hanger_select import (MAX_AREA_FRACTION, MIN_ACCEPTABLE_FRACTION, PREFAB_HANGERS,
-                           REVIEW_BELOW_FRACTION, TARGET_AREA_FRACTION, select_hanger,
+from hanger_select import (MAX_AREA_FRACTION, MAX_HEIGHT_FRACTION, MIN_ACCEPTABLE_FRACTION,
+                           MIN_WIDTH_FRACTION, PREFAB_HANGERS, REVIEW_BELOW_FRACTION,
+                           TARGET_AREA_FRACTION, TARGET_WIDTH_FRACTION, select_hanger,
                            select_hanger_meters)
+
+
+def test_the_width_floor_reproduces_the_clients_own_products():
+    """The hanger spans 55-67% of the glass width on all four real products. Area does NOT
+    describe them (16.5 / 23.1 / 26.0 / 37.0%), which is why width is now the driver."""
+    for glass_w, glass_h, fitted_w, fitted_h, client_w in [
+        (24, 36, 14.25, 10, 14.25),     # CAROL  #1004
+        (36, 36, 20, 15, 20.00),        # AMBER  #1038
+        (48, 36, 30, 15, 30.00),        # AMBER  12239 (bespoke)
+        (60, 36, 40, 20, 40.00),        # AMBER  3128  (bespoke)
+    ]:
+        c = select_hanger(glass_w, glass_h, fitted_w_in=fitted_w, fitted_h_in=fitted_h)
+        assert c.target_width_in >= MIN_WIDTH_FRACTION * glass_w - 1e-9
+        # Within 5% of what the client actually built.
+        assert abs(c.target_width_in - client_w) / client_w < 0.05, (
+            glass_w, c.target_width_in, client_w)
 
 
 def test_legend_matches_the_client_sheet():
@@ -77,11 +94,13 @@ def test_never_overshoots_the_ceiling_when_something_fits_under_it():
 
 
 def test_picks_the_largest_eligible_not_the_smallest():
-    # 28x26 = 728 sq in puts BOTH #1004 (19.57%) and #1169 (21.43%) inside the acceptance
-    # window, so there is a real choice to get wrong. The larger must win.
-    choice = select_hanger(28, 26)
-    assert set(c.part for c in choice.candidates if c.eligible) == {"1004", "1169"}
-    assert choice.part == "1169"
+    # 22x26 = 572 sq in puts BOTH #1004 (24.9%) and #1169 (27.3%, over) in play, and both
+    # clear the 55% width floor (12.1in) — so there is a real choice to get wrong.
+    choice = select_hanger(22, 26)
+    eligible = set(c.part for c in choice.candidates if c.eligible)
+    assert eligible, "no candidate qualified — the fixture no longer exercises the choice"
+    assert choice.part == max(
+        (c for c in choice.candidates if c.eligible), key=lambda c: c.area_sq_in).part
 
 
 def test_the_acceptance_window_excludes_both_too_small_and_too_big():
@@ -141,10 +160,23 @@ def test_resizes_the_fitted_hanger_when_no_prefab_qualifies():
     assert TARGET_AREA_FRACTION <= choice.fraction <= MAX_AREA_FRACTION
 
 
-def test_the_resized_hanger_keeps_its_aspect_ratio():
-    # This is what stops a wide/short hanger becoming tall/narrow, as JEN's did.
-    choice = select_hanger(12, 12, fitted_w_in=6, fitted_h_in=3)
-    assert choice.target_width_in / choice.target_height_in == pytest.approx(2.0)
+def test_the_resized_hanger_never_becomes_tall_and_narrow():
+    """What stops a wide/short hanger flipping to tall/narrow, as JEN's did.
+
+    The aspect is no longer preserved EXACTLY — the height cap may clamp it, which only ever
+    makes it wider-and-shorter — so the invariant is the direction, not the ratio.
+    """
+    # The aspect is no longer carried over from the fitted part at all — width comes from the
+    # span and height from the area band — so the surviving invariant is the DIRECTION: never
+    # taller than wide. 24x60 is the case that would otherwise flip (15.6w would want 20.8h).
+    for gw, gh, fw, fh in [(12, 12, 6, 3), (24, 60, 14.25, 15), (50, 41.5, 30, 15),
+                           (90, 36, 40, 20), (36, 72, 20, 15)]:
+        choice = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
+        if not choice.resize_fitted:
+            continue
+        assert choice.target_width_in >= choice.target_height_in, (
+            f"{gw}x{gh} came back portrait "
+            f"({choice.target_width_in}x{choice.target_height_in}) — the JEN failure")
 
 
 def test_the_resized_hanger_lands_inside_the_band():
@@ -165,35 +197,84 @@ def test_a_prefab_too_far_under_target_is_rejected_in_favour_of_resizing():
     assert c1038.eligible is False
 
 
-def test_the_lower_bound_keeps_the_two_validated_near_misses():
-    # KELLY's real 18.55% and AMBER's approved 19.79% both sit under the 20% target but
-    # must still qualify — the bound is 18%, between them and the 16.67% failure.
+def test_the_lower_bound_keeps_kellys_validated_near_miss():
+    # KELLY's real 18.55% sits under the 20% target but must still qualify — the bound is 18%,
+    # between it and the 16.67% failure. #1119 also spans 59.4% of KELLY's 24in width.
     assert select_hanger(24, 48).part == "1119"          # 18.55%
-    assert select_hanger(36, 48).part == "1333"          # 19.79%
     assert MIN_ACCEPTABLE_FRACTION == pytest.approx(0.18)
+
+
+def test_36x48_no_longer_takes_the_narrow_1333():
+    """SUPERSEDED EXPECTATION, recorded deliberately.
+
+    #1333 (14.25in) was the approved answer for 36x48 under the AREA rule at 19.79%. It spans
+    only 39.6% of the width — narrower than the 20in the client themselves put on a 36x36 — so
+    the width floor now rejects it and the fitted hanger is scaled instead. Worth re-confirming
+    with the client, which is why this is asserted rather than left to drift.
+    """
+    choice = select_hanger(36, 48, fitted_w_in=20, fitted_h_in=15)
+    c1333 = next(c for c in choice.candidates if c.part == "1333")
+    assert c1333.too_narrow is True
+    assert choice.resize_fitted is True
+    assert choice.target_width_in >= MIN_WIDTH_FRACTION * 36
 
 
 def test_the_resized_hanger_gets_clean_quarter_inch_dims():
     choice = select_hanger(50, 36, fitted_w_in=20, fitted_h_in=15)
-    assert (choice.target_width_in, choice.target_height_in) == (23.25, 17.5)
-    frac = (23.25 * 17.5) / 1800
-    assert TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION
+    step = 0.25
+    for v in (choice.target_width_in, choice.target_height_in):
+        assert abs(v / step - round(v / step)) < 1e-9, f"{v} is not a clean {step}in increment"
 
 
-def test_rounding_never_pushes_the_resize_out_of_band():
-    for gw, gh, fw, fh in [(50, 36, 20, 15), (44, 30, 18, 12), (60, 40, 24, 16),
-                           (33, 27, 11, 9), (52, 38, 26, 13)]:
+def test_a_resized_hanger_lands_in_the_20_to_25_percent_area_band():
+    """Client instruction (2026-08-06): the width sets the span, then the HEIGHT comes down so
+    the hanger still falls in the 20-25% area band. The 90in case produced 38.8% before this."""
+    for gw, gh, fw, fh in [(90, 36, 40, 20), (60, 36, 40, 20), (48, 36, 30, 15),
+                           (72, 40, 24, 16), (50, 36, 20, 15)]:
         c = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
         if not c.resize_fitted:
             continue
         frac = (c.target_width_in * c.target_height_in) / (gw * gh)
-        assert TARGET_AREA_FRACTION <= frac <= MAX_AREA_FRACTION, (gw, gh, frac)
+        assert TARGET_AREA_FRACTION - 0.02 <= frac <= MAX_AREA_FRACTION + 0.005, (
+            f"{gw}x{gh} -> {c.target_width_in}x{c.target_height_in} = {frac:.1%}")
+
+
+def test_the_90_inch_case_end_to_end():
+    """The reported failure, with the numbers the client asked for."""
+    c = select_hanger(90, 36, fitted_w_in=40, fitted_h_in=20)
+    assert c.resize_fitted is True
+    assert c.target_width_in == pytest.approx(58.5)          # 65% of 90 — spans the glass
+    assert c.target_height_in == pytest.approx(12.5)         # brought down from 21.5
+    assert (58.5 * 12.5) / (90 * 36) == pytest.approx(0.2257, abs=1e-3)
+    assert c.target_width_in - 4.25 == pytest.approx(54.25)  # where the hanging tabs land
+
+
+def test_a_resized_hanger_always_spans_the_width_floor():
+    """The point of the change: a scaled hanger must actually span the glass. Sizing by AREA
+    put a 20in hanger on a 90in mirror and the hanging tabs bunched at the centre."""
+    for gw, gh, fw, fh in [(50, 36, 20, 15), (60, 36, 40, 20), (90, 36, 40, 20),
+                           (44, 30, 18, 12), (72, 40, 24, 16)]:
+        c = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
+        if not c.resize_fitted:
+            continue
+        assert c.target_width_in >= MIN_WIDTH_FRACTION * gw - 1e-9, (gw, c.target_width_in)
+
+
+def test_a_resized_hanger_never_overflows_the_glass():
+    for gw, gh, fw, fh in [(50, 36, 20, 15), (90, 36, 40, 20), (33, 27, 11, 9),
+                           (52, 38, 26, 13), (24, 60, 14.25, 15)]:
+        c = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
+        if not c.resize_fitted:
+            continue
+        assert c.target_width_in <= gw, (gw, c.target_width_in)
+        assert c.target_height_in <= MAX_HEIGHT_FRACTION * gh + 1e-9, (gh, c.target_height_in)
 
 
 def test_a_qualifying_prefab_still_wins_over_resizing():
-    # Prefab substitution remains the default when one genuinely suits.
-    choice = select_hanger(36, 48, fitted_w_in=20, fitted_h_in=15)
-    assert choice.part == "1333"
+    # Prefab substitution remains the default when one genuinely suits — 36x36 is the case
+    # the client actually built, and #1038 spans 55.6% of the width.
+    choice = select_hanger(36, 36, fitted_w_in=14.25, fitted_h_in=10)
+    assert choice.part == "1038"
     assert choice.resize_fitted is False
     assert choice.keep_fitted is False
 

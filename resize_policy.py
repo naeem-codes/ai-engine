@@ -227,6 +227,19 @@ def is_hanger(dim_name: str,
     return _hits(dim_name, ("HANGER",))
 
 
+def is_clip(name: str) -> bool:
+    """True for a mirror clip, given EITHER a dim name or a bare component id.
+
+    Unlike the blocking checks this accepts a bare id ("1005-CLIP-1"), because mate positions
+    identify their component directly rather than through a "[...]" dim suffix — `component_of`
+    returns "" for those, so `_hits` alone would silently never match.
+
+    Clips stay FIXED_SIZE; this never unfreezes one. It exists so a clip's POSITION mate can be
+    lined up with the chassis hanging tabs, which is a placement decision, not a resize.
+    """
+    return "CLIP" in _norm(component_of(name) or name)
+
+
 def is_mirror_glass(dim_name: str,
                     component_labels: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to the mirror glass (the only legal rule master).

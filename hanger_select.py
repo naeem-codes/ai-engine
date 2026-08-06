@@ -81,6 +81,29 @@ MAX_AREA_FRACTION = 0.25      # the binding ceiling: never exceed 25% if anythin
 # landscape hanger to a portrait one, so orientation is not the discriminator — height is.
 MAX_HEIGHT_FRACTION = 0.60
 
+# ── Width span — the constraint AREA alone gets wrong on a wide mirror ────────────────────
+# A mirror hangs from a HORIZONTAL span, so the hanger has to grow with the glass WIDTH. Area
+# does not capture that: on a 90in glass the area ceiling capped the hanger at 20in (9% of area)
+# and the hanging tabs ended up bunched at the centre, which is structurally wrong and is what
+# the user reported (2026-08-06).
+#
+# Measured off the client's own four products — the hanger is consistently 55-67% of the glass
+# WIDTH, while its share of AREA is all over the place:
+#
+#   glass  hanger              width%   area%
+#   24     1004   14.25x10     59.4%    16.5%
+#   36     1038   20.00x15     55.6%    23.1%
+#   48     12239  30.00x15     62.5%    26.0%   <- over the 25% "ceiling"
+#   60     3128   40.00x20     66.7%    37.0%   <- way over
+#
+# So area is NOT the rule the client actually follows for landscape mirrors; two of their four
+# hangers breach the ceiling the selector was enforcing. Width is kept as a FLOOR (prefabs must
+# span at least MIN_WIDTH_FRACTION) and as the scaling TARGET, while the area ceiling stays on
+# to keep tall/portrait mirrors honest — that is the case area does describe well.
+MIN_WIDTH_FRACTION = 0.55     # a prefab narrower than this cannot hold the glass
+TARGET_WIDTH_FRACTION = 0.65  # what a scaled hanger aims for; reproduces 48->30 and 60->40
+                              # within 4%, and picks the client's exact prefab at 24 and 36
+
 # How far BELOW the 20% target a prefab may sit and still count as "matching". Beyond this
 # the prefab is rejected and the FITTED hanger is resized instead (client 2026-08-03: "if
 # there isn't one that follows the criteria then we should resize the existing hanger").
@@ -120,6 +143,7 @@ class Candidate:
     eligible: bool            # fits AND within the area ceiling AND within the height cap
     in_band: bool             # fits AND 20% <= fraction <= 25%
     too_tall: bool = False    # exceeds MAX_HEIGHT_FRACTION of the glass height
+    too_narrow: bool = False  # spans less than MIN_WIDTH_FRACTION of the glass width
 
 
 @dataclass
@@ -181,6 +205,9 @@ class HangerChoice:
             elif c.too_tall:
                 mark = (f"too tall — {c.height_in:g}in exceeds "
                         f"{MAX_HEIGHT_FRACTION * 100:.0f}% of the glass height")
+            elif c.too_narrow:
+                mark = (f"too narrow — {c.width_in:g}in spans under "
+                        f"{MIN_WIDTH_FRACTION * 100:.0f}% of the glass width")
             elif not c.eligible:
                 mark = f"over the {MAX_AREA_FRACTION * 100:.0f}% ceiling"
             else:
@@ -240,16 +267,19 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     max_h = glass_h_in - 2 * fit_margin_in
     height_cap = MAX_HEIGHT_FRACTION * glass_h_in
 
+    width_floor = MIN_WIDTH_FRACTION * glass_w_in
+
     candidates: list[Candidate] = []
     for part, w, h in PREFAB_HANGERS:
         area = w * h
         frac = area / glass_area
         fits = w <= max_w + 1e-9 and h <= max_h + 1e-9
         too_tall = h > height_cap + 1e-9
+        too_narrow = w < width_floor - 1e-9
         candidates.append(Candidate(
             part=part, width_in=w, height_in=h, area_sq_in=area, fraction=frac,
-            fits=fits, too_tall=too_tall,
-            eligible=(fits and not too_tall
+            fits=fits, too_tall=too_tall, too_narrow=too_narrow,
+            eligible=(fits and not too_tall and not too_narrow
                       and MIN_ACCEPTABLE_FRACTION - 1e-12 <= frac <= max_fraction + 1e-12),
             # "In band" always uses the CLIENT's stated 20-25%, never the tunable
             # arguments, so retuning can never relabel a near-miss as in-band.
@@ -267,7 +297,10 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                        and fitted_h_in <= height_cap + 1e-9)
         # Same acceptance window as prefab eligibility, so a fitted hanger is judged by the
         # exact standard a candidate would be — including KELLY's real 18.55%.
-        if fitted_fits and MIN_ACCEPTABLE_FRACTION <= fitted_frac <= MAX_AREA_FRACTION:
+        # The width floor applies here too: a hanger whose AREA is in band can still be far too
+        # narrow to span a wide glass, which is exactly how a 90in mirror kept a 20in hanger.
+        if (fitted_fits and fitted_w_in >= width_floor - 1e-9
+                and MIN_ACCEPTABLE_FRACTION <= fitted_frac <= MAX_AREA_FRACTION):
             return HangerChoice(
                 part=None, fraction=fitted_frac, in_band=True, keep_fitted=True,
                 target_width_in=fitted_w_in, target_height_in=fitted_h_in,
@@ -304,25 +337,50 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     # one." Preserving the fitted aspect ratio is what stops a wide/short hanger being turned
     # into a tall/narrow one, which is how JEN's came to overflow.
     if fitted_w_in > 0 and fitted_h_in > 0:
-        aspect = fitted_w_in / fitted_h_in
-        target_area = RESIZE_TARGET_FRACTION * glass_area
-        new_h = (target_area / aspect) ** 0.5
-        new_w = aspect * new_h
-        # Snap to a clean increment, then verify the rounding did not push it out of the band
-        # (a resized hanger has to be manufactured, so 23.25" beats 23.243").
-        step = RESIZE_ROUND_TO_IN
-        r_w, r_h = round(new_w / step) * step, round(new_h / step) * step
-        if (r_w > 0 and r_h > 0
-                and TARGET_AREA_FRACTION <= (r_w * r_h) / glass_area <= MAX_AREA_FRACTION):
-            new_w, new_h = r_w, r_h
-        if new_w <= max_w + 1e-9 and new_h <= min(max_h, height_cap) + 1e-9:
+        # WIDTH sets the span, HEIGHT then brings the AREA back into the client's 20-25% band.
+        #
+        # Sizing by area alone put a 20in hanger on a 90in glass (tabs bunched at the centre).
+        # Sizing by width alone fixed the span but left the hanger 38.8% of the area — a huge
+        # slab. Doing both is the client's instruction (2026-08-06): "to match the width it
+        # should decrease the height to make it fall in the 20-25% range". On a 90x36 that gives
+        # 58.5 x 12.5 = 22.6% instead of 58.5 x 21.5 = 38.8%.
+        new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w)
+        new_h = (RESIZE_TARGET_FRACTION * glass_area) / new_w if new_w > 0 else 0.0
+
+        # Three ceilings on the height, all one-directional — the width is never reduced to
+        # satisfy them, because the span is the whole point.
+        #   * the glass, and MAX_HEIGHT_FRACTION of it (a hanger must not run off the bottom)
+        #   * the WIDTH itself: a hanger must never come back taller than it is wide. On a tall
+        #     narrow glass (24x60) the area target alone would give 15.6w x 20.8h — precisely
+        #     the landscape-to-portrait flip that made JEN's overflow.
+        cap = min(max_h, height_cap, new_w)
+        if new_h > cap:
+            new_h = cap
+
+        # Snap to a clean increment — a resized hanger has to be manufactured, so 23.25" beats
+        # 23.243". Round to NEAREST, but fall back to flooring when that would breach the limit:
+        # an earlier version rejected the rounded pair outright whenever either dim sat exactly
+        # on a cap, and silently shipped the raw 23.4" instead.
+        def _snap(value: float, limit: float) -> float:
+            step = RESIZE_ROUND_TO_IN
+            nearest = round(value / step) * step
+            if nearest <= limit + 1e-9:
+                return nearest
+            return int(value / step) * step          # floor — never exceed the limit
+
+        s_w, s_h = _snap(new_w, max_w), _snap(new_h, cap)
+        if s_w > 0 and s_h > 0:
+            new_w, new_h = s_w, s_h
+
+        if new_w > 0 and new_h > 0 and new_w <= max_w + 1e-9 and new_h <= cap + 1e-9:
             return HangerChoice(
                 part=None, fraction=(new_w * new_h) / glass_area, in_band=True,
                 resize_fitted=True, target_width_in=new_w, target_height_in=new_h,
-                reason=f"no prefab qualifies; the fitted hanger is resized from "
-                       f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in "
-                       f"(aspect {aspect:.2f} kept, "
-                       f"{RESIZE_TARGET_FRACTION * 100:.1f}% of the glass)",
+                reason=f"no prefab spans {MIN_WIDTH_FRACTION * 100:.0f}% of the "
+                       f"{glass_w_in:g}in glass; the fitted hanger is resized from "
+                       f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in — "
+                       f"{new_w / glass_w_in * 100:.1f}% of the width for the span, height set "
+                       f"to bring it to {(new_w * new_h) / glass_area * 100:.1f}% of the area",
                 candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
     # ── 4. Nothing qualifies, and there is no fitted hanger to resize ─────────

@@ -6,6 +6,38 @@ class DimensionIn(BaseModel):
     value_meters: float
 
 
+class MatePositionIn(BaseModel):
+    """A distance mate pinning one component a fixed distance from an ASSEMBLY plane.
+
+    An absolute position, not a gap between parts, which is why a shrink has to carry it inward:
+    AMBER's mirror clip is held 18.500" from the centre plane, fine inside a 60" glass but 0.5"
+    OUTSIDE a 36" one. The dim name alone ("D1@Distance8") says nothing about what it positions,
+    so the app resolves the owning component and the axis and sends them here.
+    """
+
+    dim: str
+    value_meters: float
+    component: str
+    axis: str                     # "W", "H" or "D"
+    extent_meters: float = 0.0    # the component's own size on that axis
+
+
+class SlotRowIn(BaseModel):
+    """A row of mounting slots MEASURED off the model by the app.
+
+    Replaces a table keyed to `12211-CHASSIS`, which silently did nothing for `12204-CHASSIS` on
+    the next product. Every field comes from the geometry, so any chassis in any product works.
+    """
+
+    dim: str                       # the dim driving the slot length
+    length_meters: float           # its current value
+    count: int                     # slots in the row
+    slot_width_meters: float = 0.0 # overall slot length = length + this
+    inset_meters: float = 0.0      # part edge to the outermost slot
+    part_width_meters: float = 0.0 # the part the row lives on
+    component: str = ""
+
+
 class InterpretRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     instruction: str
@@ -15,6 +47,8 @@ class InterpretRequest(BaseModel):
     dim_axis_labels: dict[str, str] = {}
     master_width_dim: str | None = None
     master_height_dim: str | None = None
+    mate_positions: list[MatePositionIn] = []
+    slot_rows: list[SlotRowIn] = []
 
 
 class DimensionChange(BaseModel):

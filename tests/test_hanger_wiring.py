@@ -78,13 +78,17 @@ async def _resize(rules_dir, if_changes, target_in, dims=None):
 
 @pytest.mark.asyncio
 async def test_height_change_reselects_the_hanger(rules_dir):
+    # 36x36 -> 36x48. #1038 drops to 17.4% (under the 18% floor) and #1333 spans only 39.6%
+    # of the width, so no prefab qualifies and the fitted hanger is scaled instead.
+    # (Under the old AREA-only rule this picked #1333 at 14.25x24 — see
+    # test_36x48_no_longer_takes_the_narrow_1333.)
     res = await _resize(rules_dir, MIRROR_H, 48)
     assert res.error is None
     assert res.hanger is not None
-    assert res.hanger.part == "1333"
+    assert res.hanger.resize_fitted is True
     by_name = {c.name: c.value_meters for c in res.changes}
-    assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
-    assert by_name[HANGER_H] == pytest.approx(24 * IN)
+    assert by_name[HANGER_W] / IN >= 0.55 * 36
+    assert by_name[HANGER_H] / IN <= 0.60 * 48
 
 
 @pytest.mark.asyncio
@@ -118,10 +122,10 @@ async def test_sheet_metal_flat_dims_are_never_the_hanger_driver(rules_dir):
 
 @pytest.mark.asyncio
 async def test_width_only_change_also_reselects(rules_dir):
-    # 36x36 -> 30x36 = 1080 sq in. The fitted 20x15 becomes 27.78% (over the ceiling, so it
-    # cannot simply be kept) and #1119 (14.25x15 = 19.79%) is the largest that qualifies.
-    # Proves selection re-runs on a WIDTH-only change, since area moves either way.
-    res = await _resize(rules_dir, MIRROR_W, 30)
+    # 36x36 -> 24x36 = 864 sq in. The fitted 20x15 becomes 34.7% (over the ceiling, so it
+    # cannot simply be kept) and #1119 (14.25x15 = 24.7%) is the largest that qualifies while
+    # still spanning 59.4% of the width. Proves selection re-runs on a WIDTH-only change.
+    res = await _resize(rules_dir, MIRROR_W, 24)
     assert res.hanger.part == "1119"
     by_name = {c.name: c.value_meters for c in res.changes}
     assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
@@ -172,8 +176,13 @@ async def test_every_hanger_write_is_a_catalogue_or_clean_custom_size(rules_dir,
 async def test_tab_spacing_lands_on_the_known_good_value(rules_dir):
     """The headline check: AMBER's 15.75" tab spacing must land on 10.000" when the hanger
     goes 20" -> 14.25" — exactly the spacing KELLY really carries for that same 14.25"
-    hanger, both keeping the 4.25" slot inset."""
-    res = await _resize(rules_dir, MIRROR_H, 48)
+    hanger, both keeping the 4.25" slot inset.
+
+    Driven by a WIDTH change to 24" (which selects #1119 at 14.25") rather than the height
+    change that used to select #1333; the cross-validated 14.25 -> 10.000 pair is the point,
+    not which axis moved.
+    """
+    res = await _resize(rules_dir, MIRROR_W, 24)
     by_name = {c.name: c.value_meters for c in res.changes}
     assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
     assert by_name[TAB_SPACING] == pytest.approx(10.0 * IN)
@@ -181,9 +190,14 @@ async def test_tab_spacing_lands_on_the_known_good_value(rules_dir):
 
 
 @pytest.mark.asyncio
-async def test_the_4_25_inch_inset_is_preserved(rules_dir):
-    res = await _resize(rules_dir, MIRROR_H, 48)
+@pytest.mark.parametrize("axis_dim,target", [(MIRROR_W, 24), (MIRROR_H, 48), (MIRROR_W, 90)])
+async def test_the_4_25_inch_inset_is_preserved(rules_dir, axis_dim, target):
+    """Holds on all four client products, so it must hold whatever the selector picks —
+    prefab or scaled, narrow or very wide."""
+    res = await _resize(rules_dir, axis_dim, target)
     by_name = {c.name: c.value_meters for c in res.changes}
+    if HANGER_W not in by_name:
+        pytest.skip("hanger width did not move, so no follower is expected")
     inset = (by_name[HANGER_W] - by_name[TAB_SPACING]) / IN
     assert inset == pytest.approx(4.25)
 
@@ -194,6 +208,62 @@ async def test_tab_width_on_the_same_sketch_is_not_touched(rules_dir):
     # near the 4.25" inset — it must be rejected, not deformed.
     res = await _resize(rules_dir, MIRROR_H, 48)
     assert TAB_WIDTH not in {c.name for c in res.changes}
+
+
+@pytest.mark.asyncio
+async def test_a_drifted_tab_inset_is_CORRECTED_not_carried_forward(rules_dir):
+    """Reported 2026-08-06: resizing a model whose tabs were already misaligned left them just
+    as misaligned. The follower used to shift by the hanger's width delta, which faithfully
+    preserved any inset inside the +/-1" identification window instead of fixing it."""
+    dims = dict(DIMS)
+    dims[TAB_SPACING] = 15.00 * IN            # drifted: 5.00" inset instead of 4.25"
+    res = await _resize(rules_dir, MIRROR_W, 24, dims=dims)
+    by_name = {c.name: c.value_meters for c in res.changes}
+    assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
+    assert by_name[TAB_SPACING] == pytest.approx(10.0 * IN), "the drift was carried forward"
+
+
+@pytest.mark.asyncio
+async def test_a_drifted_tab_is_fixed_even_when_the_hanger_does_not_move(rules_dir):
+    """36x36 keeps its #1038 hanger, so nothing about the hanger changes — but a drifted tab
+    must still be pulled back onto the 4.25" inset."""
+    dims = dict(DIMS)
+    dims[TAB_SPACING] = 16.50 * IN            # drifted: 3.50" inset
+    res = await _resize(rules_dir, MIRROR_H, 36.0001, dims=dims)
+    by_name = {c.name: c.value_meters for c in res.changes}
+    assert by_name.get(TAB_SPACING) == pytest.approx(15.75 * IN)
+
+
+@pytest.mark.asyncio
+async def test_an_already_correct_tab_reports_no_change(rules_dir):
+    """The corollary: re-asserting the inset must stay a no-op on a healthy model, or every
+    resize would show a spurious tab write."""
+    res = await _resize(rules_dir, MIRROR_H, 36.0001)
+    assert TAB_SPACING not in {c.name for c in res.changes}
+
+
+@pytest.mark.asyncio
+async def test_duplicated_dim_dump_yields_one_follower_change(rules_dir):
+    """The app's dim dump lists every dim TWICE, which made the follower emit the same write
+    twice (seen live on AMBER 60x36). Duplicate writes made the second undo entry record the
+    already-written value as its "previous", so only the reverse-order rollback saved the
+    model — the follower must be deduped by name instead."""
+    llm = json.dumps({
+        "rule": {"if_changes": MIRROR_H, "also_change": [CHASSIS_H]},
+        "value_meters": 48 * IN,
+        "scope": "overall",
+    })
+    doubled = [DimensionIn(name=n, value_meters=v) for n, v in DIMS.items() for _ in range(2)]
+    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+        res = await interpret(InterpretRequest(
+            instruction="resize to 48",
+            dimensions=doubled,
+            dim_axis_labels=AXIS,
+            master_width_dim=MIRROR_W, master_height_dim=MIRROR_H,
+            model_path=str(rules_dir / "AmberTest.SLDASM"),
+        ))
+    assert res.hanger.follower_dims == [TAB_SPACING]
+    assert [c.name for c in res.changes].count(TAB_SPACING) == 1
 
 
 @pytest.mark.asyncio
