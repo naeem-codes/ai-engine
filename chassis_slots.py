@@ -99,33 +99,59 @@ def max_length_in(chassis_width_in: float, spec: SlotSpec) -> float:
     return (span - gaps) / spec.count - spec.slot_width_in
 
 
-def slot_length_for(chassis_width_in: float, spec: SlotSpec) -> float | None:
-    """Target slot length for this chassis width, or None to leave the slots alone.
+def slot_length_for(chassis_width_in: float, spec: SlotSpec,
+                    scale: float = 1.0) -> float | None:
+    """Target slot length at this chassis width, or None to leave the slots alone.
 
-    Returns None when the stock length still fits — growing a mirror, or shrinking it within the
-    band, must not disturb slots the client drew deliberately. Only a width that would break the
-    row shortens it, and never below what will actually fit.
+    The slots SCALE WITH THE CHASSIS, in both directions: `scale` is the part-width ratio this
+    resize applies, and the slot length tracks it like any other dependent dim. `max_length_in`
+    is then applied as a CEILING, so a shrink can never leave a row that will not fit and
+    `Cut-Extrude4` can never fail with `swSketchErrorExtRefFail`.
+
+    This used to be shorten-only, clamped at the drawn length ("stock still fits — leave it
+    exactly as drawn"). Two problems with that, both reported on AMBER 36x36. Growing a mirror
+    left the slots at their old length while everything around them got longer. Worse, the
+    "drawn" length is actually MEASURED off the live model each request, so a shrink that was
+    saved became the new ceiling — shrink-then-grow ratcheted the slots permanently shorter and
+    could never restore them (`D2@Sketch113` stuck at 6.000" on a 35.118" part, a width where
+    the drawn 7.780" fits comfortably).
+
+    Returns None only when nothing needs writing: no width change, no room at any length, or a
+    target that rounds back onto the current value.
     """
+    if scale <= 0:
+        return None
     limit = max_length_in(chassis_width_in, spec)
-    if limit >= spec.stock_length_in:
-        return None                     # stock still fits — leave it exactly as drawn
     if limit <= 0:
-        return None                     # nothing fits; shortening cannot rescue this width
-    rounded = int(limit / ROUND_TO_IN) * ROUND_TO_IN      # floor, never round up past the limit
+        return None                     # nothing fits at this width; no length can rescue it
+
+    target = spec.stock_length_in * scale        # scales up as readily as down
+    if target > limit:
+        target = limit                  # the ceiling: only ever cuts a target down, never up
+
+    rounded = int(target / ROUND_TO_IN) * ROUND_TO_IN     # floor, never round up past the limit
     if rounded <= 0:
         return None
+    if abs(rounded - spec.stock_length_in) < ROUND_TO_IN / 2:
+        return None                     # already there to within a cuttable increment
     return rounded
 
 
 def log_lines(chassis_width_in: float, spec: SlotSpec, target_in: float | None,
-              current_in: float) -> list[str]:
-    """Human-readable trace of the decision, for the engine log."""
+              current_in: float, scale: float = 1.0) -> list[str]:
+    """Human-readable trace of the decision, for the engine log.
+
+    Says which of the two numbers won — the scaled target or the fit ceiling — because when a
+    grown slot comes out shorter than the ratio asked for, that clamp is the only explanation.
+    """
     limit = max_length_in(chassis_width_in, spec)
+    scaled = spec.stock_length_in * scale
     head = (f"[SLOTS] {spec.part} at {chassis_width_in:.3f}\" chassis: {spec.count} slots + "
             f"{spec.count - 1} gaps between {spec.inset_in:.3f}\" insets → longest that fits is "
-            f"{limit:.3f}\" (stock {spec.stock_length_in:.3f}\")")
+            f"{limit:.3f}\" (from {spec.stock_length_in:.3f}\", scaled x{scale:.4f} "
+            f"= {scaled:.3f}\"{' — CLAMPED to the fit limit' if scaled > limit else ''})")
     if target_in is None:
-        return [head, f"[SLOTS]   stock length still fits — slots left unchanged"]
+        return [head, "[SLOTS]   no change needed — target rounds onto the current length"]
     gap = ((chassis_width_in + 2 * spec.gauge_in) - 2 * spec.inset_in
            - spec.count * (target_in + spec.slot_width_in)) / (spec.count - 1)
     return [

@@ -379,15 +379,19 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
 
 def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange],
                            ) -> list[tuple[str, float, float]]:
-    """Shorten the chassis mounting slots when the chassis gets too narrow to hold them.
+    """Scale the chassis mounting slots with the chassis width, in both directions.
 
-    Four slots at their drawn 7.78" no longer fit below roughly a 39" chassis: `Cut-Extrude4`
-    fails with `swSketchErrorExtRefFail` and the whole resize aborts. Shortening them is what
-    makes 60" -> 36" build (measured live; see `chassis_slots`).
+    The slots track the part width by ratio, like any other dependent dim, and the geometric fit
+    limit in `chassis_slots` is applied on top as a ceiling. That ceiling is why the feature
+    exists: four slots at their drawn 7.78" no longer fit below roughly a 39" chassis,
+    `Cut-Extrude4` fails with `swSketchErrorExtRefFail`, and the whole resize aborts. Clamping is
+    what makes 60" -> 36" build (measured live; see `chassis_slots`).
 
-    Only fires when the chassis WIDTH itself moved this turn, and only shortens — a width where
-    the stock length still fits returns nothing, so growing a mirror never disturbs slots the
-    client drew deliberately.
+    It was shorten-only until 2026-08-11: growing a mirror left the slots behind while everything
+    around them grew, and because the reference length is measured live, a saved shrink became the
+    new ceiling and ratcheted them permanently shorter.
+
+    Only fires when a WIDTH dim on the slot's own component moved this turn.
 
     Returns (dim_name, new_value_meters, current_value_meters).
     """
@@ -422,9 +426,17 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
                 continue
             new_part_w_in = (row.part_width_meters + (change.value_meters - old_driver)) / 0.0254
 
-            target_in = chassis_slots.slot_length_for(new_part_w_in, spec)
+            # Ratio off the PART WIDTH, not the driving dim: the slot row spans the part, and the
+            # fit inequality it is clamped against is written in part-width terms. The part moves
+            # by the driver's absolute delta, so the two ratios are not the same number.
+            old_part_w_in = row.part_width_meters / 0.0254
+            if old_part_w_in <= 0:
+                continue
+            scale = new_part_w_in / old_part_w_in
+
+            target_in = chassis_slots.slot_length_for(new_part_w_in, spec, scale)
             for line in chassis_slots.log_lines(new_part_w_in, spec, target_in,
-                                                current[row.dim] / 0.0254):
+                                                current[row.dim] / 0.0254, scale):
                 log("  " + line)
             if target_in is None:
                 continue
@@ -822,9 +834,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         for dim, new_val, old_val in slots:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
         if slots:
-            explanation += (f" Chassis mounting slots shortened to "
-                            f"{slots[0][1] / 0.0254:.3f}\" so they still fit the narrower "
-                            f"chassis.")
+            grew = slots[0][1] > slots[0][2]
+            explanation += (f" Chassis mounting slots {'lengthened' if grew else 'shortened'} to "
+                            f"{slots[0][1] / 0.0254:.3f}\" to track the chassis width.")
 
         hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
         changes.extend(hanger_changes)

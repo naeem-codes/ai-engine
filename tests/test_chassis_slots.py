@@ -1,4 +1,8 @@
-"""Chassis mounting-slot shortening.
+"""Chassis mounting-slot scaling.
+
+Slot length tracks the chassis width by ratio in BOTH directions; the geometric fit formula is a
+ceiling on top of that, not the rule itself. `slot_length_for(w, spec)` with no `scale` therefore
+means "hold the length, apply the ceiling" — which is what the pure-ceiling tests below exercise.
 
 The load-bearing tests are pinned to values MEASURED on the real AMBER 60x36 (2026-08-05, driven
 over COM): at a 35" chassis 6.50" rebuilds clean and 6.75" fails, and the stock 7.5" slot survives
@@ -65,37 +69,91 @@ def test_the_60_inch_original_is_far_inside_the_limit():
 
 # ── the write decision ───────────────────────────────────────────────────────
 
-def test_stock_length_is_left_alone_when_it_still_fits():
-    assert slot_length_for(BBOX, AMBER_60) is None            # the untouched 60" product
-    assert slot_length_for(_width(49.0), AMBER_60) is None    # the 50" resize that worked
-    assert slot_length_for(_width(45.0), AMBER_60) is None
+def test_an_unchanged_width_writes_nothing():
+    """scale == 1 and the length fits: no width change means no slot change."""
+    assert slot_length_for(BBOX, AMBER_60, 1.0) is None
+    assert slot_length_for(_width(49.0), AMBER_60, 1.0) is None
+    assert slot_length_for(_width(45.0), AMBER_60, 1.0) is None
 
 
 def test_shortens_at_35_inches_and_stays_under_the_measured_limit():
-    target = slot_length_for(_width(35.0), AMBER_60)
+    """The ceiling alone, with the ratio held at 1 — 7.5" cannot fit, so it is cut to what does."""
+    target = slot_length_for(_width(35.0), AMBER_60, 1.0)
     assert target is not None
     assert target <= 6.50, "must not exceed the length measured to rebuild clean"
     assert target == pytest.approx(6.25)
 
 
+# ── scaling, both directions ─────────────────────────────────────────────────
+
+def test_grows_with_the_chassis():
+    """The point of the 2026-08-11 change: a wider chassis gets longer slots.
+
+    Previously this returned None at every width above the drawn length.
+    """
+    target = slot_length_for(_width(70.0), AMBER_60, 70.118 / BBOX)
+    assert target is not None
+    assert target > AMBER_60.stock_length_in, "grew the chassis and the slots stayed put"
+    assert target == pytest.approx(8.875)
+
+
+def test_growth_is_proportional():
+    """Double the part width, double the slot — within one 1/16" cut increment."""
+    target = slot_length_for(BBOX * 2, AMBER_60, 2.0)
+    assert target == pytest.approx(2 * AMBER_60.stock_length_in, abs=chassis_slots.ROUND_TO_IN)
+
+
+def test_the_fit_ceiling_still_wins_over_the_ratio():
+    """Shrinking asks for 4.456"; that fits, so the ratio is used. Growth is what gets clamped —
+    and on the narrow side the ceiling must override any ratio that overshoots it."""
+    # A deliberately wrong scale that asks for more than the width can hold.
+    target = slot_length_for(_width(35.0), AMBER_60, 3.0)
+    assert target is not None
+    assert target == pytest.approx(6.25), "the ratio was allowed past the fit limit"
+    assert 4 * (target + AMBER_60.slot_width_in) + 3 * 0.25 <= 35.118 + 1e-9
+
+
+def test_shrink_then_grow_does_not_ratchet():
+    """The reported bug: a saved shrink became the new ceiling and the length never came back.
+
+    Shrink 59" -> 35", save, then grow back. The recovered length must land near the original
+    rather than sticking at the shortened value.
+    """
+    shrunk = slot_length_for(_width(35.0), AMBER_60, 35.118 / BBOX)
+    assert shrunk is not None and shrunk < AMBER_60.stock_length_in
+
+    # Re-measured: the model now reports the shortened slot as its current length.
+    after_save = replace(AMBER_60, stock_length_in=shrunk)
+    back = slot_length_for(BBOX, after_save, BBOX / 35.118)
+    assert back is not None, "growing back returned None — the ratchet is still there"
+    assert back == pytest.approx(AMBER_60.stock_length_in, abs=2 * chassis_slots.ROUND_TO_IN)
+
+
 def test_target_is_a_clean_sixteenth():
     for w in (35.0, 36.5, 37.25, 38.0, 38.75):
-        target = slot_length_for(_width(w), AMBER_60)
+        target = slot_length_for(_width(w), AMBER_60, _width(w) / BBOX)
         if target is not None:
             assert abs(target / chassis_slots.ROUND_TO_IN
                        - round(target / chassis_slots.ROUND_TO_IN)) < 1e-9
 
 
 def test_never_rounds_up_past_what_fits():
+    """Swept at the real scale for each width, so the ceiling is checked against ratios that
+    actually occur — not just against a held length."""
     for w in [30.0 + 0.25 * i for i in range(40)]:
-        target = slot_length_for(_width(w), AMBER_60)
+        target = slot_length_for(_width(w), AMBER_60, _width(w) / BBOX)
         if target is not None:
             assert target <= max_length_in(_width(w), ZERO_GAP)
 
 
 def test_absurdly_narrow_chassis_gives_up_rather_than_writing_nonsense():
-    assert slot_length_for(9.0, AMBER_60) is None
-    assert slot_length_for(1.0, AMBER_60) is None
+    assert slot_length_for(9.0, AMBER_60, 9.0 / BBOX) is None
+    assert slot_length_for(1.0, AMBER_60, 1.0 / BBOX) is None
+
+
+def test_a_nonsense_scale_is_refused():
+    assert slot_length_for(BBOX, AMBER_60, 0.0) is None
+    assert slot_length_for(BBOX, AMBER_60, -1.0) is None
 
 
 # ── building the spec from a measurement ─────────────────────────────────────
@@ -148,22 +206,35 @@ def _req(dims=None, rows=None):
 
 
 def test_follower_shortens_the_slots_on_the_real_60_to_36():
+    """59" -> 35" driver, so the part goes 59.118" -> 35.118": scale 0.5941, 7.5" -> 4.456",
+    floored to 4.4375". Well inside the 6.312" that fits, so the ratio governs, not the ceiling."""
     out = _slot_follower_updates(_req(), [DimensionChange(name=WIDTH, value_meters=35 * IN)])
     assert len(out) == 1
     name, new_val, old_val = out[0]
     assert name == SLOT
     assert old_val == pytest.approx(7.5 * IN)
-    assert new_val / IN == pytest.approx(6.25)
+    assert new_val / IN == pytest.approx(4.4375)
+    assert 4 * (new_val / IN + 0.28) + 3 * 0.25 <= 35.118 - 8.0 + 1e-9
 
 
-def test_follower_is_a_no_op_on_the_50_inch_resize_that_already_worked():
-    assert _slot_follower_updates(
-        _req(), [DimensionChange(name=WIDTH, value_meters=49 * IN)]) == []
+def test_follower_scales_on_the_50_inch_resize():
+    """Used to be a no-op ("stock still fits"). The slots now track the width like anything else."""
+    out = _slot_follower_updates(_req(), [DimensionChange(name=WIDTH, value_meters=49 * IN)])
+    assert len(out) == 1
+    assert out[0][1] / IN == pytest.approx(6.1875)
 
 
-def test_follower_never_fires_when_growing():
-    assert _slot_follower_updates(
-        _req(), [DimensionChange(name=WIDTH, value_meters=70 * IN)]) == []
+def test_follower_lengthens_the_slots_when_the_chassis_grows():
+    """The behaviour the user asked for: growing the mirror grows the slots.
+
+    59" -> 70" driver: part 70.118", scale 1.1861, 7.5" -> 8.898", floored to 8.875".
+    """
+    out = _slot_follower_updates(_req(), [DimensionChange(name=WIDTH, value_meters=70 * IN)])
+    assert len(out) == 1
+    name, new_val, old_val = out[0]
+    assert name == SLOT
+    assert new_val > old_val, "the chassis grew and the slots did not"
+    assert new_val / IN == pytest.approx(8.875)
 
 
 def test_follower_does_nothing_without_a_measurement():
@@ -191,8 +262,9 @@ def test_follower_works_on_a_completely_different_chassis():
     assert len(out) == 1, "the 12204 chassis was skipped — the part-number bug is back"
     name, new_val, _old = out[0]
     assert name == slot_dim
-    # 23.118 part - 8.0 insets = 15.118 span; 3 slots + 2 x 0.25" gaps -> 4.589 c-c, floored.
-    assert new_val / IN == pytest.approx(4.5625)
+    # Part 35.118" -> 23.118": scale 0.6583, 6.0" -> 3.950", floored to 3.9375". The ceiling here
+    # is 4.593" (15.118" span, 3 slots + 2 x 0.25" gaps), so the ratio governs — but still fits.
+    assert new_val / IN == pytest.approx(3.9375)
     assert 3 * (new_val / IN + 0.28) + 2 * 0.25 <= 23.118 - 8.0 + 1e-9
 
 
