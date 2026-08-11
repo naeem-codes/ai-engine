@@ -87,6 +87,10 @@ class InterpretResponse(BaseModel):
     explanation: str | None = None
     error: str | None = None
     hanger: HangerSelection | None = None
+    # Set with `error` when the refusal is specifically "this model has no rule set". The app
+    # raises a dialog pointing at ⚙ Generate Rules rather than printing it in the chat log,
+    # because it is an action the user must take, not a message to scroll past.
+    needs_rules: bool = False
 
 
 # ── Generate Rules models ─────────────────────────────────────────────────────

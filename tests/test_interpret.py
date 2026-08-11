@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
 import rules
+import rules_store as store
 from models import InterpretRequest, DimensionIn
 from interpret import interpret
 
@@ -105,113 +106,63 @@ async def test_rules_direct_changes_path(rules_dir, base_dims):
     assert result.changes[0].name == "WIDTH@Mirror"
 
 
-# ── Case 2: classification (no rules file) ────────────────────────────────────
+# ── No rules → refuse (there is no LLM-classification fallback) ───────────────
+#
+# A resize may only run from an authored, human-reviewed rule set. The old fallback asked the
+# LLM to pick the scope and the dim list itself for a model nobody had generated rules for,
+# and it ran silently — BREAM resized through it unnoticed.
 
 @pytest.mark.asyncio
-async def test_classification_applies_constant_offsets(base_dims):
-    llm_json = json.dumps({
-        "target_width_meters": 0.762,
-        "master_width_dim": "WIDTH@Mirror",
-        "width_dims": ["WIDTH@Mirror", "LED_WIDTH@LED"],
-        "target_height_meters": None,
-        "master_height_dim": None,
-        "height_dims": [],
-        "explanation": "Resizing width to 30 inches",
-    })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+async def test_no_rules_is_refused(base_dims):
+    llm = AsyncMock(return_value="{}")
+    with patch("interpret.call_llm", new=llm):
         result = await interpret(InterpretRequest(
             instruction="set width to 30 inches",
             dimensions=base_dims,
             assembly_context="ASSEMBLY CONTEXT",
             dim_axis_labels=BASE_AXIS_LABELS,
-            model_path=None,
+            master_width_dim="WIDTH@Mirror",
+            model_path=r"C:\models\NORULES-24.00X36.00.SLDASM",
         ))
-    assert result.error is None
-    width_change = next(c for c in result.changes if c.name == "WIDTH@Mirror")
-    led_change = next(c for c in result.changes if c.name == "LED_WIDTH@LED")
-    assert width_change.value_meters == pytest.approx(0.762)
-    # Dependents keep a CONSTANT offset from the master, not a ratio — see
-    # interpret._dependent_value (the AMBER 36->48 regression).
-    assert led_change.value_meters == pytest.approx(0.45 + (0.762 - 0.5))
+    assert result.changes == []
+    assert result.needs_rules is True
+    assert "Generate Rules" in (result.error or "")
+    # Refused BEFORE the LLM is called — no tokens spent deciding something we will not apply.
+    llm.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_classification_height_only(base_dims):
-    llm_json = json.dumps({
-        "target_width_meters": None,
-        "master_width_dim": None,
-        "width_dims": [],
-        "target_height_meters": 1.5,
-        "master_height_dim": "HEIGHT@Mirror",
-        "height_dims": ["HEIGHT@Mirror"],
-        "explanation": "Resizing height to 1.5m",
-    })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+async def test_no_rules_refusal_names_the_model(base_dims):
+    with patch("interpret.call_llm", new=AsyncMock(return_value="{}")):
         result = await interpret(InterpretRequest(
-            instruction="set height to 1.5m",
-            dimensions=base_dims,
-            assembly_context="ASSEMBLY CONTEXT",
-            dim_axis_labels=BASE_AXIS_LABELS,
-            model_path=None,
-        ))
-    assert result.error is None
-    assert len(result.changes) == 1
-    assert result.changes[0].name == "HEIGHT@Mirror"
-    assert result.changes[0].value_meters == pytest.approx(1.5)
-
-
-@pytest.mark.asyncio
-async def test_classification_malformed_json_returns_error(base_dims):
-    with patch("interpret.call_llm", new=AsyncMock(return_value="not json {")):
-        result = await interpret(InterpretRequest(
-            instruction="set width to 30 inches",
-            dimensions=base_dims,
-            assembly_context="ASSEMBLY CONTEXT",
-            dim_axis_labels=BASE_AXIS_LABELS,
-            model_path=None,
-        ))
-    assert result.error is not None
-    assert "invalid JSON" in result.error
-
-
-@pytest.mark.asyncio
-async def test_classification_single_scope(base_dims):
-    llm_json = json.dumps({
-        "changes": [{"dimension": "WIDTH@Mirror", "value_meters": 0.762}],
-        "explanation": "Changing only mirror glass width",
-    })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
-        result = await interpret(InterpretRequest(
-            instruction="change mirror glass width to 30 inches",
+            instruction="resize to 40 x 40 inches",
             dimensions=base_dims,
             dim_axis_labels=BASE_AXIS_LABELS,
-            model_path=None,
+            model_path=r"C:\models\BREAM-24.00X36.00-LED.SLDASM",
         ))
-    assert result.error is None
-    assert len(result.changes) == 1
-    assert result.changes[0].name == "WIDTH@Mirror"
-    assert result.changes[0].value_meters == pytest.approx(0.762)
+    assert result.needs_rules is True
+    assert "BREAM" in (result.error or "")
 
 
 @pytest.mark.asyncio
-async def test_classification_uses_request_master_when_llm_omits_it(base_dims):
-    llm_json = json.dumps({
-        "target_width_meters": 0.762,
-        "width_dims": ["WIDTH@Mirror", "LED_WIDTH@LED"],
-        "target_height_meters": None,
-        "height_dims": [],
-        "explanation": "Overall resize",
+async def test_rules_path_does_not_set_needs_rules(base_dims):
+    """needs_rules means "generate rules first" specifically — not a generic failure flag."""
+    store.write_key("HASRULES", {
+        "model": "HASRULES", "family": "HASRULES",
+        "width": [{"if_changes": "WIDTH@Mirror", "also_change": ["LED_WIDTH@LED"]}],
+        "height": [],
     })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("interpret.call_llm", new=AsyncMock(return_value='{"error": "unclear"}')):
         result = await interpret(InterpretRequest(
-            instruction="set width to 30 inches",
+            instruction="do something",
             dimensions=base_dims,
             dim_axis_labels=BASE_AXIS_LABELS,
             master_width_dim="WIDTH@Mirror",
-            model_path=None,
+            model_path=r"C:\models\HASRULES.SLDASM",
         ))
-    assert result.error is None
-    assert any(c.name == "WIDTH@Mirror" for c in result.changes)
+    assert result.error == "unclear"
+    assert not result.needs_rules
+
 
 
 # ── Case 3: no context ────────────────────────────────────────────────────────

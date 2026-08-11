@@ -1,11 +1,15 @@
-"""Label-derived axis membership: `rules.derive_rules` and its use in OVERALL scope.
+"""Label-derived axis membership: `rules.derive_rules`.
 
 `derive_rules` computes the same membership `generate_rules` does — labels are authoritative,
-narrowed by resize_policy — without storing anything. It is deliberately NOT a substitute for
-a stored rule set: it carries no limits, component labels, offsets or position rules, and it
-cannot express SINGLE ("only the chassis") or CONNECTED ("and everything mated to it") scope.
-Its one job is to stop an OVERALL resize from under-growing the frame when the AI's dim list
-is incomplete.
+narrowed by resize_policy — without storing anything. It carries no limits, component labels,
+offsets or position rules, and it cannot express SINGLE ("only the chassis") or CONNECTED
+("and everything mated to it") scope.
+
+It used to prop up the LLM-classification fallback, supplying OVERALL membership for models
+with no stored rule set. That fallback is gone — a resize now REQUIRES a reviewed rule set —
+so `derive_rules` is no longer wired into `interpret`, and the tests below assert the refusal
+where they once asserted a resize. The function is kept because it is the honest expression of
+"membership from labels" and is covered here directly.
 """
 
 import json
@@ -77,11 +81,12 @@ def test_returns_none_without_labels():
 
 
 @pytest.mark.asyncio
-async def test_overall_scope_scales_labeled_dims_the_ai_left_out():
-    """The frame must not under-grow because the AI's dim list was incomplete.
+async def test_labels_alone_no_longer_authorise_a_resize():
+    """Derivable membership is NOT permission to resize.
 
-    The mock omits the chassis entirely — historically that meant the mirror grew and the
-    chassis did not. Labels + policy now supply membership for OVERALL scope.
+    This model has full [W]/[H] labels and a master on each axis, so the old fallback happily
+    resized it from labels alone. A rule set nobody authored is a rule set nobody reviewed, so
+    the request is now refused and the user is sent to Generate Rules.
     """
     llm = json.dumps({"target_width_meters": 0.762, "width_dims": [MIRROR_W],
                       "target_height_meters": None, "height_dims": [],
@@ -95,18 +100,18 @@ async def test_overall_scope_scales_labeled_dims_the_ai_left_out():
             master_height_dim=MIRROR_H,
             model_path="C:\\models\\NEWPRODUCT-24.00X48.00-LED.SLDASM",
         ))
-    assert result.error is None
-    applied = {c.name: c.value_meters for c in result.changes}
-    assert applied[MIRROR_W] == pytest.approx(0.762)
-    # pulled in from the labels, and by CONSTANT OFFSET: 0.5588 + (0.762 - 0.6096)
-    assert applied[CHASSIS_W] == pytest.approx(0.7112)
-    # …while policy still keeps fixed-size hardware and the strip profile out of it
-    assert PSU_W not in applied and CLIP_W not in applied and LED_PROFILE not in applied
+    assert result.changes == []
+    assert result.needs_rules is True
+    assert _derived() is not None      # …even though membership WAS derivable
 
 
 @pytest.mark.asyncio
-async def test_connected_scope_keeps_the_ai_dim_list():
-    """CONNECTED encodes a mate traversal that labels cannot express — don't override it."""
+async def test_naming_a_component_does_not_bypass_the_gate():
+    """A component-scoped request ("make the chassis wider") is refused the same way.
+
+    There is no path left that resizes without a stored set — not OVERALL, not CONNECTED,
+    not SINGLE.
+    """
     llm = json.dumps({"target_width_meters": 0.762, "master_width_dim": CHASSIS_W,
                       "width_dims": [CHASSIS_W], "target_height_meters": None,
                       "height_dims": [], "explanation": "Chassis and mated parts"})
@@ -119,8 +124,8 @@ async def test_connected_scope_keeps_the_ai_dim_list():
             master_height_dim=MIRROR_H,
             model_path="C:\\models\\NEWPRODUCT-24.00X48.00-LED.SLDASM",
         ))
-    applied = {c.name for c in result.changes}
-    assert applied == {CHASSIS_W}          # the mirror was NOT dragged in
+    assert result.changes == []
+    assert result.needs_rules is True
 
 
 @pytest.mark.asyncio

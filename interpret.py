@@ -6,10 +6,10 @@ import rules_store as store
 from hanger_select import select_hanger_meters
 from models import (InterpretRequest, DimensionChange, HangerSelection,
                     InterpretResponse)
-from rules import (load_rules, parse_rules, derive_rules, validate,
+from rules import (load_rules, parse_rules, validate,
                    expand_positions, expand_offsets)
 from llm import call_llm
-from prompts import classification_prompt, rules_dependent_prompt
+from prompts import rules_dependent_prompt
 from log import log, section
 
 
@@ -514,42 +514,6 @@ def _hanger_note(hanger: HangerSelection | None,
     return note
 
 
-def _overall_membership(req: InterpretRequest, axis: str, app_master: str | None,
-                        llm_dims: list[str]) -> tuple[list[str], str]:
-    """Axis membership for an OVERALL resize, taken from labels + policy, not from the LLM.
-
-    Only for OVERALL scope — the request named no component, so "every dim on this axis that
-    policy allows" IS the answer, and the app's labeler already knows which those are.
-    CONNECTED/SINGLE are left entirely alone: their dim lists encode a mate traversal or an
-    explicit restriction that labels cannot express.
-
-    Why override at all: `generate_rules` deliberately discards the LLM's grouping for exactly
-    this reason — its position heuristic drops on-axis dims (only one chassis [H] dim captured,
-    so the frame under-grows) and drags a vertical LED strip's [H] length into the width set.
-    The stored-rules path has been immune since axis enforcement landed; this branch, used by
-    every model without a stored rule set, still trusted the model. Now it doesn't.
-
-    Returns (dims, note_for_the_log). Falls back to the LLM's list if nothing is labeled.
-    """
-    derived = derive_rules(req.dimensions, req.dim_axis_labels,
-                           req.master_width_dim, req.master_height_dim)
-    pairs = (derived.width if axis == "width" else derived.height) if derived else []
-    if not pairs:
-        return llm_dims, "no labeled membership available — kept the AI's list"
-    member = [pairs[0].if_changes] + list(pairs[0].also_change)
-    if app_master and app_master not in member:
-        member.insert(0, app_master)
-    added = [d for d in member if d not in llm_dims]
-    dropped = [d for d in llm_dims if d not in member]
-    note = f"{len(member)} labeled dim(s)"
-    if added:
-        note += f"; added {len(added)} the AI missed: {', '.join(added[:3])}"
-    if dropped:
-        note += f"; dropped {len(dropped)} not labeled [{'W' if axis == 'width' else 'H'}] " \
-                f"or blocked by policy: {', '.join(dropped[:3])}"
-    return member, note
-
-
 def _expand_master(master: str, value_meters: float, also_change: list[str],
                    current_dims: dict[str, float]) -> list[DimensionChange]:
     """One master dim plus its dependents, each moved by the master's CONSTANT OFFSET."""
@@ -634,10 +598,10 @@ def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
                     ) -> tuple[list[DimensionChange], list[str]]:
     """Drop any change that resize_policy forbids. Returns (kept, [reason lines]).
 
-    This is the last line of defence and runs on EVERY path: rules, SINGLE scope and
-    OVERALL/CONNECTED classification. Fixed-size hardware (power supply, clips, brackets,
-    hanger) and an LED strip's extrusion profile must not move even if the LLM picks them
-    directly or an overall sweep includes them.
+    This is the last line of defence on the resize path, and it also catches what the position,
+    offset and follower passes add. Fixed-size hardware (power supply, clips, brackets, hanger)
+    and an LED strip's extrusion profile must not move even if the LLM picks them directly or a
+    stale rules file lists them in also_change.
 
     `current` holds each dim's CURRENT value — deliberately not the proposed new one, so a
     cross-section dim being wrongly scaled to mirror width is still recognised as a
@@ -679,26 +643,13 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         ) or "  [H] dims: none")
 
 
-    # ── Case 2: classification ────────────────────────────────────────────────
+    # ── Resize: rules are REQUIRED ────────────────────────────────────────────
     if req.dim_axis_labels:
-        # >= 50 mm noise filter, but always keep app-labeled [W]/[H]/[D] axis drivers
-        # (a small LED-strip width, or a thin sheet-metal thickness). Generic — no
-        # model-specific names.
-        large_dims = [
-            d for d in req.dimensions
-            if d.value_meters >= 0.05 or req.dim_axis_labels.get(d.name, "?") in ("W", "H", "D")
-        ]
-        dim_list = "\n".join(
-            f"  [{req.dim_axis_labels.get(d.name, '?')}]  {d.name:<52} = {d.value_meters * 1000:>8.2f} mm  ({d.value_meters / 0.0254:>8.3f} in)"
-            for d in large_dims
-        ) or "  (no dimensions >= 50 mm found)"
-
-        # ── Which rule set applies? Three tiers, strongest first ───────────────
+        # ── Which rule set applies? Two tiers, strongest first ─────────────────
         # 1. a stored set for this model's FAMILY (or an exact-stem file) — authored and
         #    human-reviewed, so it wins whenever its masters exist in the live model;
-        # 2. the legacy per-stem path, for an install whose data dir has not bootstrapped;
-        # 3. derived from the app's labels + resize_policy — no storage, no review gate, but
-        #    strictly better than the tier it displaces (LLM classification).
+        # 2. the legacy per-stem path, for an install whose data dir has not bootstrapped.
+        # There is no third tier: without a rule set the request is refused (see below).
         live_dims = [d.name for d in req.dimensions]
         selection = store.select_for_model(req.model_path, live_dims)
         model_rules = parse_rules(selection.doc, store.stem_of(req.model_path))
@@ -707,345 +658,189 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             model_rules = load_rules(req.model_path)
             if model_rules is not None:
                 log("  [STORE] using the legacy per-stem rules path")
-        if model_rules is not None:
-            rules_json = json.dumps({
-                "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
-                "height": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.height],
-            }, indent=2)
+        # A resize may ONLY run from an authored, human-reviewed rule set. There used to be
+        # an LLM-classification fallback here that resized a model with no rules at all by
+        # asking the model to pick the scope and the dim list itself. It ran silently — a
+        # brand-new product would resize with nobody having approved what moves with what
+        # (BREAM went through it without anyone noticing). Refuse instead, and tell the app
+        # to send the user to Generate Rules.
+        if model_rules is None:
+            log("  REFUSED — no rule set resolves for this model; rules are required")
+            return InterpretResponse(
+                error=(f"No resize rules exist for {store.stem_of(req.model_path) or 'this model'}. "
+                       "Click \u2699 Generate Rules to create and review them, then try again."),
+                needs_rules=True)
 
-            # Friendly component names so the LLM can resolve "Right LED power supply" to the
-            # right component id (e.g. LPM-24096A-2) and pick that component's OWN rule —
-            # instead of guessing from cryptic dim names and grabbing an unrelated rule.
-            labels_block = ""
-            if model_rules.component_labels:
-                lines = "\n".join(f"  {cid}  =  {name}" for cid, name in model_rules.component_labels.items())
-                labels_block = (
-                    "\nCOMPONENT NAMES (english name ⇄ component id — use to resolve which "
-                    f"component the user means):\n{lines}\n"
-                )
+        rules_json = json.dumps({
+            "width": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.width],
+            "height": [{"if_changes": p.if_changes, "also_change": p.also_change} for p in model_rules.height],
+        }, indent=2)
 
-            log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}")
-            raw = await call_llm(
-                rules_dependent_prompt(rules_json, labels_block,
-                                       master_width_dim=req.master_width_dim,
-                                       master_height_dim=req.master_height_dim),
-                req.instruction, max_tokens=512)
-            try:
-                data = json.loads(_strip_fences(raw))
-            except json.JSONDecodeError as exc:
-                return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
-            if "error" in data:
-                return InterpretResponse(error=data["error"])
+        # Friendly component names so the LLM can resolve "Right LED power supply" to the
+        # right component id (e.g. LPM-24096A-2) and pick that component's OWN rule —
+        # instead of guessing from cryptic dim names and grabbing an unrelated rule.
+        labels_block = ""
+        if model_rules.component_labels:
+            lines = "\n".join(f"  {cid}  =  {name}" for cid, name in model_rules.component_labels.items())
+            labels_block = (
+                "\nCOMPONENT NAMES (english name ⇄ component id — use to resolve which "
+                f"component the user means):\n{lines}\n"
+            )
 
-            rule_data = data.get("rule", {})
-            if_changes = rule_data.get("if_changes", "")
-            also_change = rule_data.get("also_change", [])
-            value_meters = float(data.get("value_meters", 0))
-            scope = str(data.get("scope", "")).strip().lower()
-            log(f"  if_changes={if_changes!r}  value_meters={value_meters}  scope={scope!r}")
-
-            # SAFETY NET — re-anchor an overall resize to the true master dim. A component dim
-            # literally named "WIDTH"/"HEIGHT" (e.g. a 59mm power-supply D1@WIDTH) can get picked
-            # for a plain "change width to 40" and, since value_meters is applied to if_changes,
-            # the master then scales by (target / tiny-component) → the whole assembly blows up
-            # (observed 17x). For an overall change, if_changes MUST be the master dim. The axis
-            # comes from the picked dim (still the right AXIS even if the wrong dim); we then swap
-            # to that axis's master and use the master rule's own also_change.
-            if scope == "overall" and if_changes:
-                # Axis via _axis_of, NOT via width-rule membership: rules now hold one
-                # master per axis, so a wrongly-picked component dim is in no width rule
-                # and the old membership test would re-anchor it to the HEIGHT master.
-                on_width = _axis_of(if_changes, model_rules, req.dim_axis_labels) == "width"
-                master = req.master_width_dim if on_width else req.master_height_dim
-                axis_rules = model_rules.width if on_width else model_rules.height
-                if master and if_changes != master:
-                    mrule = next((r for r in axis_rules if r.if_changes == master), None)
-                    if mrule is not None:
-                        log(f"  [OVERALL] re-anchored if_changes {if_changes!r} → master {master!r}")
-                        if_changes = master
-                        also_change = list(mrule.also_change)
-
-            if not if_changes or value_meters <= 0:
-                return InterpretResponse(error="AI returned invalid rule response")
-
-            # Refuse outright when the user targeted a fixed-size component, rather than
-            # silently applying nothing: the master dim is NOT a substitute for it.
-            trigger = _axis_of(if_changes, model_rules, req.dim_axis_labels)
-            dim_values = {d.name: d.value_meters for d in req.dimensions}
-            target_block = policy.block_reason(if_changes, trigger,
-                                               model_rules.component_labels,
-                                               dim_values.get(if_changes))
-            if target_block:
-                log(f"  [POLICY] REFUSE target {if_changes!r} — {target_block}")
-                return InterpretResponse(error=f"Cannot resize {if_changes} — {target_block}.")
-
-            # Validate against limits — skip min check if rule has no dependencies
-            limit_error = validate(model_rules, trigger, value_meters, check_min=bool(also_change))
-            if limit_error:
-                return InterpretResponse(error=limit_error)
-
-            current_dims = {d.name: d.value_meters for d in req.dimensions}
-            changes = _expand_master(if_changes, value_meters, also_change, current_dims)
-
-            # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this
-            # the other axis was silently dropped and the explanation told the user to submit it
-            # separately (seen live: "change to 24.00 X 36.00" resized width only; it looked right
-            # only because the height already happened to be 36").
-            second, second_note = _second_axis_changes(
-                data, scope, if_changes, model_rules, req, current_dims)
-            changes.extend(second)
-            rules_note += second_note
-
-            # Position rules: shift distance-mate offsets so components hold a constant
-            # gap from a moving edge. Applied AFTER proportional scaling, and override
-            # any proportional value for the same dim (a mate offset must not be scaled).
-            changes_by_name = {c.name: c.value_meters for c in changes}
-            pos_changes = expand_positions(model_rules, trigger, changes_by_name, current_dims)
-            for pos_dim, pos_val in pos_changes:
-                existing = next((c for c in changes if c.name == pos_dim), None)
-                if existing is not None:
-                    log(f"    [POS] {pos_dim} override {existing.value_meters*1000:.2f} → {pos_val*1000:.2f} mm")
-                    existing.value_meters = pos_val
-                else:
-                    log(f"    [POS] {pos_dim} = {pos_val*1000:.2f} mm (edge-follow)")
-                    changes.append(DimensionChange(name=pos_dim, value_meters=pos_val))
-
-            # Fixed-offset links: hold a target dim a constant absolute distance from a
-            # source dim (e.g. hanging-tab spacing follows the hanger width so the tab
-            # stays in its slot). Runs LAST so it sees the scaled source value, and
-            # overrides any proportional value for the target (a rigid gap must not scale).
-            changes_by_name = {c.name: c.value_meters for c in changes}
-            off_changes = expand_offsets(model_rules, changes_by_name, current_dims)
-            for off_dim, off_val in off_changes:
-                existing = next((c for c in changes if c.name == off_dim), None)
-                if existing is not None:
-                    log(f"    [OFFSET] {off_dim} override {existing.value_meters*1000:.2f} → {off_val*1000:.2f} mm")
-                    existing.value_meters = off_val
-                else:
-                    log(f"    [OFFSET] {off_dim} = {off_val*1000:.2f} mm (linked to source + offset)")
-                    changes.append(DimensionChange(name=off_dim, value_meters=off_val))
-
-            # Final policy guard — a stale rules file (generated before the fixed-size
-            # policy) can still list a clip/bracket/power-supply dim in also_change, and
-            # expand_positions/expand_offsets can add one too. Nothing gets past here.
-            changes, dropped = _enforce_policy(changes, req.dim_axis_labels,
-                                               model_rules.component_labels, trigger,
-                                               current_dims)
-            if not changes:
-                return InterpretResponse(error="Every dimension in this change is fixed-size "
-                                               "hardware that cannot be resized.")
-
-            explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
-            if dropped:
-                explanation += f" (left unchanged: {len(dropped)} fixed-size dim(s))"
-            # Coverage gap / derived-membership notice. Previously silent: an unmatched dep was
-            # skipped with only an engine-log line, so an under-grown frame looked like a bug.
-            explanation += rules_note
-
-            # Frost band before the hanger: it follows the LED strip, which is already in
-            # `changes`, and it must not be confused with the hanger's own followers.
-            frost = _frost_follower_updates(req, changes, model_rules.component_labels)
-            for dim, new_val, old_val in frost:
-                changes.append(DimensionChange(name=dim, value_meters=new_val))
-                log(f"    [FROST] {dim}: {old_val / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" "
-                    f"(matches the LED strip length)")
-            if frost:
-                explanation += (f" Frosted band followed the LED strip to "
-                                f"{frost[0][1] / 0.0254:.3f}\".")
-
-            # Slots before the hanger: this reads the chassis width that the rules just set, and
-            # must be in `changes` before the app's inside-out ordering sequences the batch.
-            slots = _slot_follower_updates(req, changes)
-            for dim, new_val, old_val in slots:
-                changes.append(DimensionChange(name=dim, value_meters=new_val))
-            if slots:
-                explanation += (f" Chassis mounting slots shortened to "
-                                f"{slots[0][1] / 0.0254:.3f}\" so they still fit the narrower "
-                                f"chassis.")
-
-            hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
-            changes.extend(hanger_changes)
-            explanation += _hanger_note(hanger, hanger_changes)
-
-            # Last, so it sees every size change already decided and never double-shifts a dim
-            # another step is writing.
-            mates = _mate_position_updates(req, changes, hanger)
-            for dim, new_val, _old, comp in mates:
-                changes.append(DimensionChange(name=dim, value_meters=new_val))
-            if mates:
-                explanation += (f" Moved {len(mates)} positioned component(s) "
-                                f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same "
-                                f"distance from the edge.")
-
-            _log_changes("CASE 2 rules changes", changes)
-            return InterpretResponse(changes=changes, explanation=explanation, hanger=hanger)
-
-        # No rules file → use keywords to decide context
-        _dependent_keywords = ("related", "corresponding", "dependent", "and everything", "dependencies")
-        is_dependent = any(kw in req.instruction.lower() for kw in _dependent_keywords)
-        context_for_prompt = req.assembly_context if is_dependent else None
-
-        log(f"  CASE 2 (classification)  large_dims={len(large_dims)}  context_in_prompt={'yes' if context_for_prompt else 'no (OVERALL/SINGLE scope)'}")
-        log(f"  dim_list sent to prompt:\n{dim_list}")
-
+        log(f"  CASE 2 (rules)  rules_json={len(rules_json)} chars  component_labels={len(model_rules.component_labels)}")
         raw = await call_llm(
-            classification_prompt(
-                context_for_prompt,
-                dim_list,
-                master_width_dim=req.master_width_dim,
-                master_height_dim=req.master_height_dim,
-            ),
-            req.instruction,
-            max_tokens=2048,
-        )
+            rules_dependent_prompt(rules_json, labels_block,
+                                   master_width_dim=req.master_width_dim,
+                                   master_height_dim=req.master_height_dim),
+            req.instruction, max_tokens=512)
         try:
             data = json.loads(_strip_fences(raw))
         except json.JSONDecodeError as exc:
-            log(f"  ERROR: LLM returned invalid JSON: {exc}")
             return InterpretResponse(error=f"LLM returned invalid JSON: {exc}")
-
         if "error" in data:
-            log(f"  ERROR (from AI): {data['error']}")
             return InterpretResponse(error=data["error"])
 
-        # SINGLE scope
-        if "changes" in data:
-            changes = [
-                DimensionChange(name=c["dimension"], value_meters=c["value_meters"])
-                for c in data["changes"]
-                if c.get("value_meters", 0) > 0
-            ]
-            if not changes:
-                log("  ERROR: AI returned empty changes list (SINGLE scope)")
-                return InterpretResponse(error="AI returned an empty changes list")
-            changes, dropped = _enforce_policy(
-                changes, req.dim_axis_labels, None, "",
-                {d.name: d.value_meters for d in req.dimensions})
-            if not changes:
-                return InterpretResponse(
-                    error="That component is fixed-size hardware and cannot be resized — "
-                          + (dropped[0].split(": ", 1)[-1] if dropped else ""))
-            _log_changes("CASE 2 SINGLE scope changes", changes)
-            return InterpretResponse(changes=changes, explanation=data.get("explanation"))
+        rule_data = data.get("rule", {})
+        if_changes = rule_data.get("if_changes", "")
+        also_change = rule_data.get("also_change", [])
+        value_meters = float(data.get("value_meters", 0))
+        scope = str(data.get("scope", "")).strip().lower()
+        log(f"  if_changes={if_changes!r}  value_meters={value_meters}  scope={scope!r}")
 
-        # OVERALL / CONNECTED scope: ratio-based scaling
-        dims_by_name = {d.name: d.value_meters for d in req.dimensions}
-        changes: list[DimensionChange] = []
-        axis_errors: list[str] = []
+        # SAFETY NET — re-anchor an overall resize to the true master dim. A component dim
+        # literally named "WIDTH"/"HEIGHT" (e.g. a 59mm power-supply D1@WIDTH) can get picked
+        # for a plain "change width to 40" and, since value_meters is applied to if_changes,
+        # the master then scales by (target / tiny-component) → the whole assembly blows up
+        # (observed 17x). For an overall change, if_changes MUST be the master dim. The axis
+        # comes from the picked dim (still the right AXIS even if the wrong dim); we then swap
+        # to that axis's master and use the master rule's own also_change.
+        if scope == "overall" and if_changes:
+            # Axis via _axis_of, NOT via width-rule membership: rules now hold one
+            # master per axis, so a wrongly-picked component dim is in no width rule
+            # and the old membership test would re-anchor it to the HEIGHT master.
+            on_width = _axis_of(if_changes, model_rules, req.dim_axis_labels) == "width"
+            master = req.master_width_dim if on_width else req.master_height_dim
+            axis_rules = model_rules.width if on_width else model_rules.height
+            if master and if_changes != master:
+                mrule = next((r for r in axis_rules if r.if_changes == master), None)
+                if mrule is not None:
+                    log(f"  [OVERALL] re-anchored if_changes {if_changes!r} → master {master!r}")
+                    if_changes = master
+                    also_change = list(mrule.also_change)
 
-        target_w = data.get("target_width_meters")
-        master_w = data.get("master_width_dim") or req.master_width_dim
-        width_dims: list[str] = data.get("width_dims") or []
-        # No master in the response ⇒ OVERALL scope (the prompt only asks for one on
-        # CONNECTED), so labels + policy decide membership rather than the model's list.
-        if not data.get("master_width_dim") and width_dims:
-            width_dims, note = _overall_membership(req, "width", master_w, width_dims)
-            log(f"  [OVERALL] width membership from labels — {note}")
-        log(f"  target_w={target_w}  master_w={master_w!r}  width_dims={width_dims}")
-        if target_w and master_w and width_dims:
-            master_current = dims_by_name.get(master_w, 0.0)
-            if master_current <= 0:
-                axis_errors.append(f"Master width dim '{master_w}' not found in loaded dimensions")
+        if not if_changes or value_meters <= 0:
+            return InterpretResponse(error="AI returned invalid rule response")
+
+        # Refuse outright when the user targeted a fixed-size component, rather than
+        # silently applying nothing: the master dim is NOT a substitute for it.
+        trigger = _axis_of(if_changes, model_rules, req.dim_axis_labels)
+        dim_values = {d.name: d.value_meters for d in req.dimensions}
+        target_block = policy.block_reason(if_changes, trigger,
+                                           model_rules.component_labels,
+                                           dim_values.get(if_changes))
+        if target_block:
+            log(f"  [POLICY] REFUSE target {if_changes!r} — {target_block}")
+            return InterpretResponse(error=f"Cannot resize {if_changes} — {target_block}.")
+
+        # Validate against limits — skip min check if rule has no dependencies
+        limit_error = validate(model_rules, trigger, value_meters, check_min=bool(also_change))
+        if limit_error:
+            return InterpretResponse(error=limit_error)
+
+        current_dims = {d.name: d.value_meters for d in req.dimensions}
+        changes = _expand_master(if_changes, value_meters, also_change, current_dims)
+
+        # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this
+        # the other axis was silently dropped and the explanation told the user to submit it
+        # separately (seen live: "change to 24.00 X 36.00" resized width only; it looked right
+        # only because the height already happened to be 36").
+        second, second_note = _second_axis_changes(
+            data, scope, if_changes, model_rules, req, current_dims)
+        changes.extend(second)
+        rules_note += second_note
+
+        # Position rules: shift distance-mate offsets so components hold a constant
+        # gap from a moving edge. Applied AFTER proportional scaling, and override
+        # any proportional value for the same dim (a mate offset must not be scaled).
+        changes_by_name = {c.name: c.value_meters for c in changes}
+        pos_changes = expand_positions(model_rules, trigger, changes_by_name, current_dims)
+        for pos_dim, pos_val in pos_changes:
+            existing = next((c for c in changes if c.name == pos_dim), None)
+            if existing is not None:
+                log(f"    [POS] {pos_dim} override {existing.value_meters*1000:.2f} → {pos_val*1000:.2f} mm")
+                existing.value_meters = pos_val
             else:
-                for dname in width_dims:
-                    if dname != master_w and policy.is_mate_dim(dname):
-                        log(f"    [W] SKIP {dname!r} — {policy.MATE_DIM_REASON}")
-                        continue
-                    current = dims_by_name.get(dname)
-                    if current is None:
-                        log(f"    [W] SKIP {dname!r} — not in dims")
-                        continue
-                    new_val = (target_w if dname == master_w
-                               else _dependent_value(current, master_current, target_w))
-                    if new_val is None:
-                        log(f"    [W] SKIP {dname!r} — {current / master_current:.1%} of the "
-                            f"master: fixed profile, left at {current / 0.0254:.3f}\"")
-                        continue
-                    if new_val <= 0:
-                        log(f"    [W] SKIP {dname!r} — constant offset would give {new_val*1000:.2f} mm")
-                        continue
-                    log(f"    [W] {dname}  {current * 1000:.2f} mm  →  {new_val * 1000:.2f} mm")
-                    changes.append(DimensionChange(name=dname, value_meters=new_val))
+                log(f"    [POS] {pos_dim} = {pos_val*1000:.2f} mm (edge-follow)")
+                changes.append(DimensionChange(name=pos_dim, value_meters=pos_val))
 
-        target_h = data.get("target_height_meters")
-        master_h = data.get("master_height_dim") or req.master_height_dim
-        height_dims: list[str] = data.get("height_dims") or []
-        if not data.get("master_height_dim") and height_dims:
-            height_dims, note = _overall_membership(req, "height", master_h, height_dims)
-            log(f"  [OVERALL] height membership from labels — {note}")
-        log(f"  target_h={target_h}  master_h={master_h!r}  height_dims={height_dims}")
-        if target_h and master_h and height_dims:
-            master_current = dims_by_name.get(master_h, 0.0)
-            if master_current <= 0:
-                axis_errors.append(f"Master height dim '{master_h}' not found in loaded dimensions")
+        # Fixed-offset links: hold a target dim a constant absolute distance from a
+        # source dim (e.g. hanging-tab spacing follows the hanger width so the tab
+        # stays in its slot). Runs LAST so it sees the scaled source value, and
+        # overrides any proportional value for the target (a rigid gap must not scale).
+        changes_by_name = {c.name: c.value_meters for c in changes}
+        off_changes = expand_offsets(model_rules, changes_by_name, current_dims)
+        for off_dim, off_val in off_changes:
+            existing = next((c for c in changes if c.name == off_dim), None)
+            if existing is not None:
+                log(f"    [OFFSET] {off_dim} override {existing.value_meters*1000:.2f} → {off_val*1000:.2f} mm")
+                existing.value_meters = off_val
             else:
-                for dname in height_dims:
-                    if dname != master_h and policy.is_mate_dim(dname):
-                        log(f"    [H] SKIP {dname!r} — {policy.MATE_DIM_REASON}")
-                        continue
-                    current = dims_by_name.get(dname)
-                    if current is None:
-                        log(f"    [H] SKIP {dname!r} — not in dims")
-                        continue
-                    new_val = (target_h if dname == master_h
-                               else _dependent_value(current, master_current, target_h))
-                    if new_val is None:
-                        log(f"    [H] SKIP {dname!r} — {current / master_current:.1%} of the "
-                            f"master: fixed profile, left at {current / 0.0254:.3f}\"")
-                        continue
-                    if new_val <= 0:
-                        log(f"    [H] SKIP {dname!r} — constant offset would give {new_val*1000:.2f} mm")
-                        continue
-                    log(f"    [H] {dname}  {current * 1000:.2f} mm  →  {new_val * 1000:.2f} mm")
-                    changes.append(DimensionChange(name=dname, value_meters=new_val))
+                log(f"    [OFFSET] {off_dim} = {off_val*1000:.2f} mm (linked to source + offset)")
+                changes.append(DimensionChange(name=off_dim, value_meters=off_val))
 
+        # Final policy guard — a stale rules file (generated before the fixed-size
+        # policy) can still list a clip/bracket/power-supply dim in also_change, and
+        # expand_positions/expand_offsets can add one too. Nothing gets past here.
+        changes, dropped = _enforce_policy(changes, req.dim_axis_labels,
+                                           model_rules.component_labels, trigger,
+                                           current_dims)
         if not changes:
-            error_msg = "; ".join(axis_errors) if axis_errors else "AI classified no dimensions — check assembly context"
-            log(f"  ERROR: {error_msg}")
-            return InterpretResponse(error=error_msg)
+            return InterpretResponse(error="Every dimension in this change is fixed-size "
+                                           "hardware that cannot be resized.")
 
-        # An overall/connected sweep scales every [W]/[H] dim it was handed, so without
-        # this guard a model with no rules file would still stretch the clips and
-        # power supply. No component_labels available on this path — id patterns only.
-        changes, dropped = _enforce_policy(changes, req.dim_axis_labels, None, "", dims_by_name)
-        if not changes:
-            return InterpretResponse(error="All classified dimensions are fixed-size hardware "
-                                           "that cannot be resized.")
-        explanation = data.get("explanation")
+        explanation = data.get("explanation") or f"Applied rule for {if_changes} with {len(changes)} dimensions"
         if dropped:
-            explanation = (explanation or "") + f" (left unchanged: {len(dropped)} fixed-size dim(s))"
+            explanation += f" (left unchanged: {len(dropped)} fixed-size dim(s))"
+        # Coverage gap / derived-membership notice. Previously silent: an unmatched dep was
+        # skipped with only an engine-log line, so an under-grown frame looked like a bug.
+        explanation += rules_note
 
-        frost = _frost_follower_updates(req, changes, None)
+        # Frost band before the hanger: it follows the LED strip, which is already in
+        # `changes`, and it must not be confused with the hanger's own followers.
+        frost = _frost_follower_updates(req, changes, model_rules.component_labels)
         for dim, new_val, old_val in frost:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
             log(f"    [FROST] {dim}: {old_val / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" "
                 f"(matches the LED strip length)")
         if frost:
-            explanation = (explanation or "") + (
-                f" Frosted band followed the LED strip to {frost[0][1] / 0.0254:.3f}\".")
+            explanation += (f" Frosted band followed the LED strip to "
+                            f"{frost[0][1] / 0.0254:.3f}\".")
 
+        # Slots before the hanger: this reads the chassis width that the rules just set, and
+        # must be in `changes` before the app's inside-out ordering sequences the batch.
         slots = _slot_follower_updates(req, changes)
         for dim, new_val, old_val in slots:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
         if slots:
-            explanation = (explanation or "") + (
-                f" Chassis mounting slots shortened to {slots[0][1] / 0.0254:.3f}\" so they "
-                f"still fit the narrower chassis.")
+            explanation += (f" Chassis mounting slots shortened to "
+                            f"{slots[0][1] / 0.0254:.3f}\" so they still fit the narrower "
+                            f"chassis.")
 
-        hanger_changes, hanger = _hanger_changes(req, changes, None)
+        hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
         changes.extend(hanger_changes)
-        explanation = (explanation or "") + _hanger_note(hanger, hanger_changes)
+        explanation += _hanger_note(hanger, hanger_changes)
 
+        # Last, so it sees every size change already decided and never double-shifts a dim
+        # another step is writing.
         mates = _mate_position_updates(req, changes, hanger)
         for dim, new_val, _old, comp in mates:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
         if mates:
-            explanation = (explanation or "") + (
-                f" Moved {len(mates)} positioned component(s) "
-                f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same distance "
-                f"from the edge.")
+            explanation += (f" Moved {len(mates)} positioned component(s) "
+                            f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same "
+                            f"distance from the edge.")
 
-        _log_changes("CASE 2 OVERALL/CONNECTED final changes", changes)
+        _log_changes("CASE 2 rules changes", changes)
         return InterpretResponse(changes=changes, explanation=explanation, hanger=hanger)
 
     # ── Case 3: no rules, no context ─────────────────────────────────────────
