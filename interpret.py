@@ -78,6 +78,7 @@ def _dependent_value(current: float, master_current: float, master_new: float) -
 
 def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
                     component_labels: dict[str, str] | None,
+                    width_deps: list[str] | None = None,
                     ) -> tuple[list[DimensionChange], HangerSelection | None]:
     """Re-select the prefab hanger for the RESIZED glass and write its catalogue dims.
 
@@ -127,9 +128,31 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
     # already correctly sized, or resize it when no prefab qualifies.
     fitted_w = current.get(w_dim, 0.0) if w_dim else 0.0
     fitted_h = current.get(h_dim, 0.0) if h_dim else 0.0
+    # The chassis the hanger bolts to, at its POST-resize width. Every other check sizes the
+    # hanger against the GLASS, which hides the difference on a product with a narrow border
+    # (AMBER's chassis is glass - 2in) and gets it badly wrong on a wide one: CLARA's is
+    # glass - 6in, so a 24in glass leaves an 18in chassis and the 20in #1038 was KEPT, hanging an
+    # inch past each end of the part its tabs are cut into.
+    #
+    # Taken from the WIDTH RULE's dependents, NOT from "the largest [W] dim on a chassis". That
+    # heuristic reads plausibly and is wrong: the chassis also carries the hanging-tab spacing on
+    # the W axis (D1@Sketch81 = 15.750" on a 36in AMBER), so on any model whose real width dim is
+    # missing or smaller it caps the hanger against the TAB SPACING -- the very thing the hanger
+    # is supposed to be driving. The rule set already names the chassis width dependent, decided
+    # by the labeler at generation time, so use its answer. Missing (0) disables the cap rather
+    # than rejecting everything.
+    chassis_w = max(
+        (master_value(dim) for dim in (width_deps or []) if policy.is_chassis(dim)),
+        default=0.0)
+    if chassis_w > 0:
+        log(f"  [HANGER] chassis width after this resize: {chassis_w / 0.0254:.3f}\"")
+    else:
+        log("  [HANGER] no chassis width in the width rule - hanger not capped against it")
+
     choice = select_hanger_meters(glass_w, glass_h,
                                   fitted_w_in=fitted_w / 0.0254,
-                                  fitted_h_in=fitted_h / 0.0254)
+                                  fitted_h_in=fitted_h / 0.0254,
+                                  chassis_w_in=chassis_w / 0.0254)
     for line in choice.log_lines():
         log("  " + line)
 
@@ -865,7 +888,10 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             explanation += (f" Chassis mounting slots {'lengthened' if grew else 'shortened'} to "
                             f"{slots[0][1] / 0.0254:.3f}\" to track the chassis width.")
 
-        hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
+        # The width rule's dependents include the chassis width dim, which caps the hanger.
+        width_deps = [d for r in model_rules.width for d in r.also_change]
+        hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels,
+                                                 width_deps)
         changes.extend(hanger_changes)
         explanation += _hanger_note(hanger)
 

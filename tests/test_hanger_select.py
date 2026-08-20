@@ -376,3 +376,48 @@ def test_log_lines_cover_every_candidate_and_mark_the_choice():
     assert any("CHOSEN" in ln and "#1333" in ln for ln in lines)
     # #1215 is 40" WIDE, so on a 36" glass it simply does not fit.
     assert any("does not fit" in ln and "#1215" in ln for ln in lines)
+
+
+# ── the CHASSIS, not just the glass ──────────────────────────────────────────
+#
+# The hanger bolts to the chassis and its tabs are cut into the chassis, but every other check
+# measures it against the GLASS. On AMBER that is invisible (chassis = glass - 2"); on CLARA
+# (glass - 6") it is decisive.
+
+def test_clara_24x60_no_longer_keeps_a_hanger_wider_than_its_chassis():
+    """Live 2026-08-18. A 24x60 glass leaves an 18" chassis, and keep_fitted held the 20" #1038
+    because 300/1440 = 20.83% is a fine share of the GLASS — so the hanger overhung the part
+    carrying its tabs by an inch each side."""
+    old = select_hanger(24, 60, fitted_w_in=20, fitted_h_in=15)
+    assert old.keep_fitted is True, "precondition: without the chassis it is kept"
+
+    c = select_hanger(24, 60, fitted_w_in=20, fitted_h_in=15, chassis_w_in=18)
+    assert c.keep_fitted is False
+    assert c.target_width_in <= 18
+    assert c.part == "1333"          # 14.25 wide, fits the chassis with room to spare
+
+
+def test_a_prefab_wider_than_the_chassis_is_ineligible_and_says_why():
+    c = select_hanger(24, 60, chassis_w_in=18)
+    c1038 = next(k for k in c.candidates if k.part == "1038")
+    assert c1038.over_chassis is True
+    assert c1038.eligible is False
+    assert any("wider than the 18in chassis" in ln and "#1038" in ln for ln in c.log_lines())
+
+
+def test_a_scaled_hanger_is_capped_by_the_chassis_too():
+    # 0.65 x 90 = 58.5" of span wanted, but the chassis is only 40" — a stretched hanger is no
+    # more allowed to overhang than a catalogue one.
+    c = select_hanger(90, 36, fitted_w_in=20, fitted_h_in=15, chassis_w_in=40)
+    assert c.resize_fitted is True
+    assert c.target_width_in <= 40
+
+
+def test_omitting_the_chassis_changes_nothing():
+    """The cap is opt-in: a model whose rules name no chassis width must behave exactly as
+    before rather than having every hanger rejected."""
+    for w, h in [(36, 36), (24, 48), (36, 48), (24, 36), (18, 20)]:
+        a = select_hanger(w, h, fitted_w_in=20, fitted_h_in=15)
+        b = select_hanger(w, h, fitted_w_in=20, fitted_h_in=15, chassis_w_in=0)
+        assert (a.part, a.keep_fitted, a.target_width_in) == \
+               (b.part, b.keep_fitted, b.target_width_in), (w, h)

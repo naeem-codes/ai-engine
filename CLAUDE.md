@@ -70,7 +70,8 @@ flush the sync outbox. Idempotent, safe every boot.
 
 **Rules are keyed by PRODUCT FAMILY, not by file stem.** `family_of()` strips the size token:
 `KELLY-24.00X48.00-LED` → `KELLY-LED`. This is why it matters: the app's `SaveSizedVariant`
-renames only size-bearing files, so component ids — and therefore dim names — are identical at
+(step 1 of its two-button build-review-export drawing flow) renames only size-bearing files,
+so component ids — and therefore dim names — are identical at
 24×48 and 30×48. Keying by stem meant every sized variant looked like an unknown model and lost
 the rule set that made the resize correct (it then fell through to LLM classification, which
 silently resized it anyway; today it would be refused outright). One generation now covers every
@@ -272,10 +273,25 @@ from the app's labels on every regeneration and would otherwise keep re-adding b
 
 ### Hanger (`hanger_select.py`)
 Selected from the 7-part prefab legend, never scaled: the **largest** prefab that physically fits,
-stays under `MAX_AREA_FRACTION` (25% of glass **area**) and under `MAX_HEIGHT_FRACTION` (60% of
-glass height). 20% is a soft target used only for flagging. Reproduces every known data point
+stays under `MAX_AREA_FRACTION` (25% of glass **area**), under `MAX_HEIGHT_FRACTION` (60% of
+glass height), and **no wider than the CHASSIS** (`chassis_w_in`, clearance
+`CHASSIS_CLEARANCE_IN` = 0). 20% is a soft target used only for flagging. Reproduces every known data point
 (AMBER 36×36 → #1038, KELLY 24×48 → #1119, AMBER 36×48 → #1333). A bespoke fitted hanger already
 in band is kept untouched. `HangerChoice.log_lines()` makes the whole decision auditable.
+
+**The chassis cap applies at ALL THREE steps, and `keep_fitted` is the one that matters.**
+The hanger bolts to the chassis and its tabs are cut into it, but every other check sizes it
+against the GLASS. AMBER hides this (chassis = glass - 2"); CLARA does not (glass - 6"). At a
+24x60 CLARA glass the chassis is 18" and `keep_fitted` held the 20" #1038 - 300/1440 = 20.83%, a
+fine share of the glass - so it overhung the part carrying its tabs by an inch each side (live
+2026-08-18). Checking only during prefab substitution would never have run.
+
+The chassis width comes from the **width rule's dependents** (`interpret._hanger_changes`
+`width_deps`), *not* from "the largest `[W]` dim on a chassis" - the chassis also carries the
+hanging-tab spacing on the W axis (`D1@Sketch81` = 15.750" on a 36" AMBER), so that heuristic caps
+the hanger against the tab spacing the hanger is supposed to be driving. Clearance is deliberately
+0: CLARA's chassis is 12" at an 18" glass and every 12" prefab would fail any positive margin,
+pushing that whole size range onto custom hangers.
 
 **The choice reaches the app in one of two shapes, and they are mutually exclusive:**
 

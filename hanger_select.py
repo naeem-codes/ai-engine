@@ -120,6 +120,21 @@ MIN_ACCEPTABLE_FRACTION = TARGET_AREA_FRACTION - ACCEPT_BELOW_TARGET_MARGIN   # 
 
 # A resized hanger is a part someone has to make, so give it clean dimensions rather than
 # raw square-root output (23.243" -> 23.25").
+# -- The CHASSIS, not just the glass ------------------------------------------------------
+# The hanger bolts to the CHASSIS and the tabs it seats on are cut into the chassis, but every
+# check above measures the hanger against the GLASS. On AMBER that distinction is invisible --
+# its chassis is glass - 2in, so the two are nearly interchangeable. CLARA's is glass - 6in, and
+# there the difference is decisive: at a 24x60 glass the chassis is 18in while `keep_fitted`
+# happily kept the 20in #1038, because 300/1440 = 20.8% is a perfectly good share of the GLASS.
+# The hanger then overhung the part it mounts to by an inch each side (reported live 2026-08-18).
+#
+# Clearance is 0 by default -- the hanger may be exactly as wide as the chassis, just never wider.
+# Deliberately NOT a positive margin: CLARA's chassis is 12in at an 18in glass, and every 12in
+# prefab would fail any margin at all, pushing that whole size range onto custom hangers. That
+# trades one wrong answer for a different one, and the client's stated preference is stock parts.
+# Raise it once they say how much chassis must remain outboard of the hanger.
+CHASSIS_CLEARANCE_IN = 0.0
+
 RESIZE_ROUND_TO_IN = 0.25
 
 # Where to aim when no prefab qualifies and the fitted hanger has to be resized: the middle
@@ -144,6 +159,7 @@ class Candidate:
     in_band: bool             # fits AND 20% <= fraction <= 25%
     too_tall: bool = False    # exceeds MAX_HEIGHT_FRACTION of the glass height
     too_narrow: bool = False  # spans less than MIN_WIDTH_FRACTION of the glass width
+    over_chassis: bool = False  # wider than the chassis it would bolt to
 
 
 @dataclass
@@ -174,6 +190,9 @@ class HangerChoice:
     # emit a DXF cut pattern from it.
     target_width_in: float = 0.0
     target_height_in: float = 0.0
+    # Width of the chassis the hanger bolts to, 0 when not supplied. Recorded so the trace
+    # can say WHY a prefab was passed over, not just that it was.
+    chassis_w_in: float = 0.0
 
     @property
     def target_width_m(self) -> float:
@@ -205,6 +224,8 @@ class HangerChoice:
             elif c.too_tall:
                 mark = (f"too tall — {c.height_in:g}in exceeds "
                         f"{MAX_HEIGHT_FRACTION * 100:.0f}% of the glass height")
+            elif c.over_chassis:
+                mark = f"wider than the {self.chassis_w_in:g}in chassis it bolts to"
             elif c.too_narrow:
                 mark = (f"too narrow — {c.width_in:g}in spans under "
                         f"{MIN_WIDTH_FRACTION * 100:.0f}% of the glass width")
@@ -249,7 +270,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                   target_fraction: float = TARGET_AREA_FRACTION,
                   fit_margin_in: float = FIT_MARGIN_IN,
                   fitted_w_in: float = 0.0,
-                  fitted_h_in: float = 0.0) -> HangerChoice:
+                  fitted_h_in: float = 0.0,
+                  chassis_w_in: float = 0.0) -> HangerChoice:
     """Choose a hanger for a glass panel of `glass_w_in` x `glass_h_in` inches.
 
     `fitted_w_in`/`fitted_h_in` describe the hanger ALREADY in the model. Supplying them
@@ -257,6 +279,11 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
       * it is already in the 20-25% band  -> keep it, change nothing (`keep_fitted`);
       * no prefab qualifies              -> scale it, keeping its aspect (`resize_fitted`).
     Omit them and the behaviour is pure prefab selection, as before.
+
+    `chassis_w_in` is the width of the chassis the hanger bolts to, AFTER this resize. When given
+    it caps every outcome -- kept, substituted or scaled -- because a hanger wider than its
+    chassis overhangs the part carrying its tabs. Omit it (0) and the chassis is not considered,
+    which is the old behaviour.
     """
     glass_area = glass_w_in * glass_h_in
     if glass_area <= 0:
@@ -268,6 +295,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     height_cap = MAX_HEIGHT_FRACTION * glass_h_in
 
     width_floor = MIN_WIDTH_FRACTION * glass_w_in
+    # 0 means "not supplied" -- never let a missing value silently reject every hanger.
+    chassis_cap = (chassis_w_in - CHASSIS_CLEARANCE_IN) if chassis_w_in > 0 else float("inf")
 
     candidates: list[Candidate] = []
     for part, w, h in PREFAB_HANGERS:
@@ -276,10 +305,11 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         fits = w <= max_w + 1e-9 and h <= max_h + 1e-9
         too_tall = h > height_cap + 1e-9
         too_narrow = w < width_floor - 1e-9
+        over_chassis = w > chassis_cap + 1e-9
         candidates.append(Candidate(
             part=part, width_in=w, height_in=h, area_sq_in=area, fraction=frac,
-            fits=fits, too_tall=too_tall, too_narrow=too_narrow,
-            eligible=(fits and not too_tall and not too_narrow
+            fits=fits, too_tall=too_tall, too_narrow=too_narrow, over_chassis=over_chassis,
+            eligible=(fits and not too_tall and not too_narrow and not over_chassis
                       and MIN_ACCEPTABLE_FRACTION - 1e-12 <= frac <= max_fraction + 1e-12),
             # "In band" always uses the CLIENT's stated 20-25%, never the tunable
             # arguments, so retuning can never relabel a near-miss as in-band.
@@ -299,7 +329,11 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         # exact standard a candidate would be — including KELLY's real 18.55%.
         # The width floor applies here too: a hanger whose AREA is in band can still be far too
         # narrow to span a wide glass, which is exactly how a 90in mirror kept a 20in hanger.
+        # The chassis cap applies here too, and this is the gate CLARA actually failed: the
+        # fitted hanger was a fine share of the glass and was kept, while being wider than the
+        # chassis. Checking it only during prefab substitution would never have run.
         if (fitted_fits and fitted_w_in >= width_floor - 1e-9
+                and fitted_w_in <= chassis_cap + 1e-9
                 and MIN_ACCEPTABLE_FRACTION <= fitted_frac <= MAX_AREA_FRACTION):
             return HangerChoice(
                 part=None, fraction=fitted_frac, in_band=True, keep_fitted=True,
@@ -308,7 +342,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                        f"{fitted_frac * 100:.2f}% of the {glass_area:.0f} sq in glass "
                        f"(inside the {TARGET_AREA_FRACTION * 100:.0f}-"
                        f"{MAX_AREA_FRACTION * 100:.0f}% band) — left unchanged",
-                candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
+                chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
     rejected_oversize = _rejected_oversize(candidates)
     eligible = [c for c in candidates if c.eligible]
@@ -329,7 +363,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
             target_width_in=best.width_in, target_height_in=best.height_in,
             reason=f"largest prefab that fits and stays within {max_fraction * 100:.0f}% "
                    f"of the {glass_area:.0f} sq in glass: {best.fraction * 100:.2f}% ({note})",
-            candidates=candidates, rejected_oversize=rejected_oversize,
+            chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=rejected_oversize,
         )
 
     # ── 3. No prefab qualifies → resize the FITTED hanger, keeping its aspect ─
@@ -344,7 +378,9 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         # slab. Doing both is the client's instruction (2026-08-06): "to match the width it
         # should decrease the height to make it fall in the 20-25% range". On a 90x36 that gives
         # 58.5 x 12.5 = 22.6% instead of 58.5 x 21.5 = 38.8%.
-        new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w)
+        # Capped by the chassis as well as the glass: a scaled hanger is no more allowed to
+        # overhang the part carrying its tabs than a catalogue one is.
+        new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w, chassis_cap)
         new_h = (RESIZE_TARGET_FRACTION * glass_area) / new_w if new_w > 0 else 0.0
 
         # Three ceilings on the height, all one-directional — the width is never reduced to
@@ -372,7 +408,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         if s_w > 0 and s_h > 0:
             new_w, new_h = s_w, s_h
 
-        if new_w > 0 and new_h > 0 and new_w <= max_w + 1e-9 and new_h <= cap + 1e-9:
+        if (new_w > 0 and new_h > 0 and new_w <= max_w + 1e-9 and new_h <= cap + 1e-9
+                and new_w <= chassis_cap + 1e-9):
             return HangerChoice(
                 part=None, fraction=(new_w * new_h) / glass_area, in_band=True,
                 resize_fitted=True, target_width_in=new_w, target_height_in=new_h,
@@ -381,7 +418,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                        f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in — "
                        f"{new_w / glass_w_in * 100:.1f}% of the width for the span, height set "
                        f"to bring it to {(new_w * new_h) / glass_area * 100:.1f}% of the area",
-                candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
+                chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
     # ── 4. Nothing qualifies, and there is no fitted hanger to resize ─────────
     # Take the fitting prefab whose area sits CLOSEST to the band. One rule covers both
@@ -389,12 +426,13 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     # closest; on a huge panel every prefab is under the target and the LARGEST is closest.
     # (The previous "smallest that fits" was right only for the first case and picked the very
     # worst option for the second — a 10%-of-glass hanger on a 60x80 panel.)
-    fitting = [c for c in candidates if c.fits]
+    fitting = [c for c in candidates if c.fits and not c.over_chassis]
     if not fitting:
         return HangerChoice(
             part=None, needs_review=True,
-            reason=f"no prefab fits inside a {glass_w_in:g}x{glass_h_in:g}in glass",
-            candidates=candidates, rejected_oversize=rejected_oversize)
+            reason=f"no prefab fits inside a {glass_w_in:g}x{glass_h_in:g}in glass"
+                   + (f" and a {chassis_w_in:g}in chassis" if chassis_w_in > 0 else ""),
+            chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=rejected_oversize)
 
     smallest = min(fitting, key=lambda c: (_band_distance(c.fraction), c.area_sq_in))
     _above = smallest.fraction > MAX_AREA_FRACTION
@@ -407,7 +445,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                f"{max_fraction * 100:.0f}% band for the {glass_area:.0f} sq in glass; closest "
                f"that fits is #{smallest.part} at {smallest.fraction * 100:.2f}% "
                f"({'above' if _above else 'below'} the band)",
-        candidates=candidates, rejected_oversize=rejected_oversize,
+        chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=rejected_oversize,
     )
 
 

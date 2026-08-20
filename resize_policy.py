@@ -216,6 +216,18 @@ def is_mate_dim(dim_name: str) -> bool:
     return bool(_MATE_DIM_RE.match(clean))
 
 
+def is_chassis(dim_name: str) -> bool:
+    """True if this dim belongs to the chassis.
+
+    Not a blocking decision — the chassis is a normal resize dependent. This exists so
+    `interpret._hanger_changes` can find the chassis WIDTH and cap the hanger against it: the
+    hanger bolts to the chassis and its tabs are cut into it, so a hanger wider than the chassis
+    overhangs the part carrying its tabs (CLARA 24x60, live 2026-08-18). Matched on the component
+    id like every other check here, never on the LLM's friendly label.
+    """
+    return _hits(dim_name, ("CHASSIS",))
+
+
 def is_hanger(dim_name: str,
               component_labels: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to the hanger.
