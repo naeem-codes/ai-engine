@@ -1,5 +1,14 @@
-"""Hanger re-selection wired into interpret(): it must fire on any size change, write only
-exact catalogue dims, and never be blocked by the fixed-size policy that guards it."""
+"""Hanger re-selection wired into interpret(): it must fire on any size change and never be
+blocked by the fixed-size policy that guards it.
+
+Two outcomes, and the split matters:
+  * a CATALOGUE PREFAB is chosen -> `hanger.replace` is set and NO hanger dimension is written.
+    The app swaps the component for the real .SLDPRT out of its HANGERS library, so the size
+    arrives as a different file. The chassis tab follower must still fire, driven off the
+    prefab's catalogue width rather than off a dimension write that no longer exists.
+  * NO PREFAB QUALIFIES -> `hanger.resize_fitted`, and the fitted hanger is stretched through
+    `changes` exactly as before, because there is no file to swap in.
+"""
 
 import json
 import os
@@ -127,8 +136,37 @@ async def test_width_only_change_also_reselects(rules_dir):
     # still spanning 59.4% of the width. Proves selection re-runs on a WIDTH-only change.
     res = await _resize(rules_dir, MIRROR_W, 24)
     assert res.hanger.part == "1119"
-    by_name = {c.name: c.value_meters for c in res.changes}
-    assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
+    assert res.hanger.replace is True
+    assert res.hanger.part_name == "1119-HANGER"
+    assert res.hanger.target_width_meters == pytest.approx(14.25 * IN)
+    assert res.hanger.target_height_meters == pytest.approx(15 * IN)
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_prefab_writes_no_hanger_dimensions(rules_dir):
+    """The contract of the swap: the prefab file already IS the catalogue size, so stretching
+    the fitted hanger onto that outline would be redundant AND would leave the wrong internal
+    hole pattern behind. `changes` must carry the tab follower and nothing else off the hanger."""
+    res = await _resize(rules_dir, MIRROR_W, 24)
+    assert res.hanger.replace is True
+    written = {c.name for c in res.changes}
+    assert HANGER_W not in written
+    assert HANGER_H not in written
+    assert HANGER_MINOR not in written
+    assert HANGER_SHEETMETAL not in written
+
+
+@pytest.mark.asyncio
+async def test_replace_and_resize_fitted_are_mutually_exclusive(rules_dir):
+    """A swap and a stretch are the two ways to reach a correct hanger and must never both
+    fire — that would write dimensions onto a part the app is about to throw away."""
+    for axis_dim, target in [(MIRROR_W, 24), (MIRROR_H, 48), (MIRROR_W, 90), (MIRROR_H, 36)]:
+        res = await _resize(rules_dir, axis_dim, target)
+        h = res.hanger
+        assert sum([h.replace, h.resize_fitted, h.keep_fitted]) <= 1, (axis_dim, target)
+        if h.replace:
+            assert h.part, "replace with no part number"
+            assert not {c.name for c in res.changes} & {HANGER_W, HANGER_H}
 
 
 # ── no-op when the fitted hanger is already right ─────────────────────────────
@@ -181,10 +219,15 @@ async def test_tab_spacing_lands_on_the_known_good_value(rules_dir):
     Driven by a WIDTH change to 24" (which selects #1119 at 14.25") rather than the height
     change that used to select #1333; the cross-validated 14.25 -> 10.000 pair is the point,
     not which axis moved.
+
+    #1119 is a SWAP, so the new hanger width never appears in `changes`. The follower has to
+    take it from the prefab's catalogue width instead — reading it back out of the change list
+    would find nothing and silently leave the tabs at the old 20" hanger's 15.75" spacing.
     """
     res = await _resize(rules_dir, MIRROR_W, 24)
     by_name = {c.name: c.value_meters for c in res.changes}
-    assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
+    assert res.hanger.replace is True
+    assert res.hanger.target_width_meters == pytest.approx(14.25 * IN)
     assert by_name[TAB_SPACING] == pytest.approx(10.0 * IN)
     assert res.hanger.follower_dims == [TAB_SPACING]
 
@@ -193,12 +236,18 @@ async def test_tab_spacing_lands_on_the_known_good_value(rules_dir):
 @pytest.mark.parametrize("axis_dim,target", [(MIRROR_W, 24), (MIRROR_H, 48), (MIRROR_W, 90)])
 async def test_the_4_25_inch_inset_is_preserved(rules_dir, axis_dim, target):
     """Holds on all four client products, so it must hold whatever the selector picks —
-    prefab or scaled, narrow or very wide."""
+    prefab or scaled, narrow or very wide.
+
+    The width the tabs must track comes from `target_width_meters`, which is set on BOTH
+    outcomes. Reading it out of `changes` instead would silently skip every swap, since a
+    swapped-in prefab writes no dimensions at all."""
     res = await _resize(rules_dir, axis_dim, target)
     by_name = {c.name: c.value_meters for c in res.changes}
-    if HANGER_W not in by_name:
+    new_hanger_w = res.hanger.target_width_meters
+    assert new_hanger_w > 0
+    if TAB_SPACING not in by_name:
         pytest.skip("hanger width did not move, so no follower is expected")
-    inset = (by_name[HANGER_W] - by_name[TAB_SPACING]) / IN
+    inset = (new_hanger_w - by_name[TAB_SPACING]) / IN
     assert inset == pytest.approx(4.25)
 
 
@@ -219,7 +268,7 @@ async def test_a_drifted_tab_inset_is_CORRECTED_not_carried_forward(rules_dir):
     dims[TAB_SPACING] = 15.00 * IN            # drifted: 5.00" inset instead of 4.25"
     res = await _resize(rules_dir, MIRROR_W, 24, dims=dims)
     by_name = {c.name: c.value_meters for c in res.changes}
-    assert by_name[HANGER_W] == pytest.approx(14.25 * IN)
+    assert res.hanger.target_width_meters == pytest.approx(14.25 * IN)
     assert by_name[TAB_SPACING] == pytest.approx(10.0 * IN), "the drift was carried forward"
 
 
@@ -276,9 +325,10 @@ async def test_no_follower_change_when_only_the_hanger_height_moves(rules_dir):
             TAB_SPACING: 10 * IN, TAB_WIDTH: 1.75 * IN}
     res = await _resize(rules_dir, MIRROR_H, 40, dims=dims)
     assert res.hanger.part == "1119"
+    assert res.hanger.replace is True
     by_name = {c.name: c.value_meters for c in res.changes}
-    assert by_name[HANGER_H] == pytest.approx(15 * IN)   # height did move
-    assert HANGER_W not in by_name                       # width did not
+    assert res.hanger.target_height_meters == pytest.approx(15 * IN)   # height did move
+    assert res.hanger.target_width_meters == pytest.approx(14.25 * IN)  # width did not
     assert TAB_SPACING not in by_name                    # so the tabs stay put
     assert res.hanger.follower_dims == []
 

@@ -71,9 +71,10 @@ flush the sync outbox. Idempotent, safe every boot.
 **Rules are keyed by PRODUCT FAMILY, not by file stem.** `family_of()` strips the size token:
 `KELLY-24.00X48.00-LED` → `KELLY-LED`. This is why it matters: the app's `SaveSizedVariant`
 renames only size-bearing files, so component ids — and therefore dim names — are identical at
-24×48 and 30×48. Keying by stem meant every sized variant looked like an unknown model and fell
-through to LLM classification, silently losing the rule set that made the resize correct. One
-generation now covers every size of a product.
+24×48 and 30×48. Keying by stem meant every sized variant looked like an unknown model and lost
+the rule set that made the resize correct (it then fell through to LLM classification, which
+silently resized it anyway; today it would be refused outright). One generation now covers every
+size of a product.
 
 A genuine part swap (AMBER 36 vs 60 — different chassis part number, 6 B-slots vs 8) gets its
 own set as `FAMILY#2`, `#3`, assigned automatically on save by comparing component-id sets. Which
@@ -210,9 +211,9 @@ app), `master_width_dim`, `master_height_dim`. All lengths are **meters** everyw
 
 ---
 
-## `/interpret` — three paths (`interpret.py`)
+## `/interpret` — one resize path, two refusals (`interpret.py`)
 
-**Case 1 — rules file exists** (the normal production path). `rules_dependent_prompt` gets the
+**Case 1 — rules file exists** (the ONLY path that resizes). `rules_dependent_prompt` gets the
 rules JSON + friendly component labels + the master dims; the LLM returns only
 `{rule, scope, value_meters, explanation}`. Then, deterministically:
 
@@ -230,9 +231,13 @@ rules JSON + friendly component labels + the master dims; the LLM returns only
 8. **`_frost_follower_updates`** then **`_hanger_changes`** (order matters: the frost band follows
    the strip, and must not be confused with the hanger's followers).
 
-**Case 2 — no rules file** → `classification_prompt` with OVERALL / SINGLE / CONNECTED scope
-(CONNECTED does a full transitive walk of the COMPONENT RELATIONSHIP MAP the app builds).
-Dependents use the same constant-offset helper; the same policy guard, frost and hanger passes run.
+**Case 2 — no rules file** → refuse, **before any LLM call**: `error` names the model and points
+at ⚙ Generate Rules, with `needs_rules: true` so the app raises a dialog instead of printing a
+chat line. There used to be a `classification_prompt` fallback here that resized a model with no
+rules at all by having the LLM choose the scope and the dim list itself (OVERALL / CONNECTED /
+SINGLE). It ran silently — BREAM resized through it for months with nobody having reviewed what
+moves with what — so it is **deleted**, prompt included. Do not reintroduce a resize path that
+runs without a stored set; `tests/test_prompts.py` asserts the prompt stays gone.
 
 **Case 3 — no `dim_axis_labels`** → error telling the user to click Refresh first.
 
@@ -270,11 +275,32 @@ Selected from the 7-part prefab legend, never scaled: the **largest** prefab tha
 stays under `MAX_AREA_FRACTION` (25% of glass **area**) and under `MAX_HEIGHT_FRACTION` (60% of
 glass height). 20% is a soft target used only for flagging. Reproduces every known data point
 (AMBER 36×36 → #1038, KELLY 24×48 → #1119, AMBER 36×48 → #1333). A bespoke fitted hanger already
-in band is kept untouched; if nothing qualifies the fitted one is scaled to mid-band. Only exact
-catalogue sizes are ever written, plus the chassis hanging-tab follower
-(`HANGER_FOLLOWER_HINTS = ("SKETCH81",)`, cross-checked against a 4.25" inset — a sketch *number* is
-the fragile part, so verify per product). `HangerChoice.log_lines()` makes the whole decision
-auditable.
+in band is kept untouched. `HangerChoice.log_lines()` makes the whole decision auditable.
+
+**The choice reaches the app in one of two shapes, and they are mutually exclusive:**
+
+| outcome | `changes` carries | what the app does |
+|---|---|---|
+| `replace` — a prefab qualified | the tab follower **only** | swaps the component for `HANGERS\<part>-HANGER.SLDPRT` |
+| `resize_fitted` — nothing qualified | the two hanger dims + follower | stretches the fitted hanger, as before |
+| `keep_fitted` — bespoke, in band | the tab follower only | nothing |
+
+The client supplied the real prefab parts, so a chosen prefab is now **swapped in as a component,
+not written as dimensions** — `interpret._hanger_changes` emits no hanger dim writes on that path.
+The old behaviour stretched whatever hanger was placed onto the catalogue *outline*, which got the
+silhouette right and the internal hole pattern wrong (hence the since-dropped DXF-suppression
+caveat). `resize_fitted` survives because the catalogue tops out at 20" wide and a 90" mirror needs
+~58": there is no file to swap in, so stretching is the only option left.
+
+Idempotence is deliberately the **app's** call — only it can see whether the component already
+points at that file. Dimensions can't answer it: a bespoke hanger previously stretched to 14.25×15
+measures exactly like a real #1119.
+
+The chassis hanging-tab follower runs on every path (`HANGER_FOLLOWER_HINTS = ("SKETCH81",)`,
+cross-checked against a 4.25" inset — a sketch *number* is the fragile part, so verify per product).
+On the swap path its driving width comes from `target_width_meters`, **not** from `changes`, which
+no longer holds a hanger dim — reading it from there would silently leave the tabs at the old
+hanger's spacing.
 
 ---
 
@@ -298,11 +324,11 @@ Rules flow every time, so a patch is thrown away. Fix the generator: this module
 the app's labeler (`GetDimAxisLabels` / `LabelComponentDims` / `TryPerturbDrivenAxis` /
 `FindMasterDims`). After a labeler change the user must rebuild → reconnect → **regenerate**.
 
-`derive_rules()` in `rules.py` computes the same membership without storing anything, and is used
-by the **OVERALL** branch of classification so an incomplete AI dim list can't under-grow the
-frame. It is deliberately not a substitute for a stored set: it carries no limits, component
-labels, offsets or position rules, and it cannot express SINGLE ("only the chassis") or CONNECTED
-("and everything mated to it") scope — those need the classification path's own dim lists.
+`derive_rules()` in `rules.py` computes the same membership without storing anything. It propped
+up the OVERALL branch of classification; with that path deleted it is **no longer called in
+production** — kept and unit-tested (`tests/test_derived_rules.py`) as the honest expression of
+"membership from labels", and a candidate building block for a Generate-Rules preview. It was
+never a substitute for a stored set: no limits, component labels, offsets or position rules.
 
 Rules-file shape: `width`/`height` (`if_changes` + `also_change`), `component_labels`, `limits`,
 `pattern_rules` (component multiplication — stored and forwarded only; the app applies them),

@@ -139,8 +139,12 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         over_ceiling=choice.over_ceiling, needs_review=choice.needs_review,
         keep_fitted=choice.keep_fitted, resize_fitted=choice.resize_fitted,
         reason=choice.reason, width_dim=w_dim or "", height_dim=h_dim or "",
+        target_width_meters=choice.target_width_m,
+        target_height_meters=choice.target_height_m,
     )
-    def finish(out: list[DimensionChange]) -> tuple[list[DimensionChange], HangerSelection]:
+    def finish(out: list[DimensionChange],
+               hanger_w: float | None = None,
+               ) -> tuple[list[DimensionChange], HangerSelection]:
         """Append the chassis HANGING TAB follower, then return.
 
         Every exit goes through here, including the ones where the hanger itself does not move.
@@ -149,14 +153,21 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         gated behind the hanger changing, and `keep_fitted` returned before it entirely
         (reported 2026-08-06). Every resize now re-asserts the 4.25" inset; a write that comes
         out identical is dropped, so a healthy model still reports no change.
+
+        `hanger_w` is the hanger's width AFTER this turn in metres. It has to be passed in for
+        the COMPONENT SWAP path: there the new width arrives as a different part file, not as a
+        dimension write, so reading it back out of `out` would find nothing and silently leave
+        the tabs at the old hanger's spacing.
         """
         if not w_dim:
             return out, sel
         old_w = current.get(w_dim, 0.0)
         if old_w <= 0:
             return out, sel
-        # The hanger width AFTER this turn — unchanged unless we are writing it.
-        new_w = next((c.value_meters for c in out if c.name == w_dim), old_w)
+        # The hanger width AFTER this turn — from the swapped-in prefab if one is being fitted,
+        # else from a dimension write, else unchanged.
+        new_w = hanger_w if hanger_w else next(
+            (c.value_meters for c in out if c.name == w_dim), old_w)
         for dim, new_val, inset_in in _hanger_follower_updates(req, old_w, new_w - old_w):
             if abs(new_val - current.get(dim, 0.0)) < 1e-9:
                 continue              # already correct — nothing to write
@@ -176,15 +187,32 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         log("  [HANGER] no prefab fits — hanger left unchanged (no new hangers by policy)")
         return finish([])
 
+    if choice.part:
+        # ── A CATALOGUE PREFAB WAS CHOSEN → the app SWAPS THE COMPONENT ───────────────
+        # The real .SLDPRT ships in the app's HANGERS library, so there is nothing to write
+        # here: the file already carries the catalogue size AND the genuine internal hole
+        # pattern. This replaces the old behaviour of stretching the fitted hanger's
+        # `D2@Base-Flange1`/`D1@Sketch1` onto the catalogue outline, which reproduced the
+        # prefab's silhouette but not its holes (hence the DXF-suppression caveat, now moot).
+        #
+        # Idempotence is the APP's call, not ours: only it can see whether the component
+        # already points at `<part>-HANGER.SLDPRT`. Comparing dimensions cannot tell a real
+        # #1119 from a bespoke hanger someone previously stretched to 14.25x15.
+        sel.replace = True
+        log(f"  [HANGER] → replace the placed hanger with prefab {choice.part_name} "
+            f"({choice.target_width_in:g}x{choice.target_height_in:g}in)")
+        return finish([], hanger_w=choice.target_width_m)
+
+    # ── resize_fitted: no prefab spans this glass, so stretch the one that is fitted ──
     out: list[DimensionChange] = []
     for dim, target in ((w_dim, choice.target_width_m), (h_dim, choice.target_height_m)):
         if not dim or target <= 0:
             continue
         if abs(current.get(dim, 0.0) - target) < 1e-6:
-            continue      # already the right catalogue size (e.g. #1038 on a 36x36)
+            continue      # already at the computed size
         out.append(DimensionChange(name=dim, value_meters=target))
     if not out:
-        log(f"  [HANGER] #{choice.part} already fitted at the correct size — no change")
+        log("  [HANGER] fitted hanger already at the computed size — no change")
     return finish(out)
 
 
@@ -500,8 +528,7 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
     return updates
 
 
-def _hanger_note(hanger: HangerSelection | None,
-                 hanger_changes: list[DimensionChange]) -> str:
+def _hanger_note(hanger: HangerSelection | None) -> str:
     """One human-readable clause about the hanger, for the chat explanation."""
     if hanger is None:
         return ""
@@ -514,9 +541,9 @@ def _hanger_note(hanger: HangerSelection | None,
     if not hanger.part:
         return " No prefab hanger fits this size — the hanger was left unchanged."
     pct = f"{hanger.fraction * 100:.2f}% of the glass"
-    if not hanger_changes:
-        return f" Hanger #{hanger.part} is already the correct prefab ({pct})."
-    note = f" Hanger resized to prefab #{hanger.part} ({pct})."
+    # The swap itself is the app's job and can still be refused there (a broken mate aborts it),
+    # so this says what was CHOSEN, not what landed — the app reports the outcome separately.
+    note = f" Hanger to be replaced with prefab #{hanger.part} ({pct})."
     if hanger.needs_review:
         note += " NEEDS REVIEW — well under the 20% target."
     elif hanger.over_ceiling:
@@ -840,7 +867,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
         hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels)
         changes.extend(hanger_changes)
-        explanation += _hanger_note(hanger, hanger_changes)
+        explanation += _hanger_note(hanger)
 
         # Last, so it sees every size change already decided and never double-shifts a dim
         # another step is writing.

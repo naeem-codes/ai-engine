@@ -59,14 +59,22 @@ class DimensionChange(BaseModel):
 class HangerSelection(BaseModel):
     """Which prefab hanger the resized glass calls for (see hanger_select.py).
 
-    The dimension writes are already in `InterpretResponse.changes`; this block carries the
-    IDENTITY of the chosen prefab so the app can stamp the `Number` custom property, put the
-    part number on the drawing, and suppress the hanger DXF (the resized part reproduces the
-    prefab's outline, not its internal hole pattern — hangers are stocked, not fabricated).
-    Additive field: older app builds simply ignore it.
+    Two different outcomes reach the app through this block:
+
+    * `replace` — a CATALOGUE prefab was chosen. The real `.SLDPRT` for it exists in the app's
+      bundled `HANGERS\\` library, so the app SWAPS THE COMPONENT rather than stretching the
+      one already fitted. No hanger dimension writes are emitted in this case; `changes` holds
+      only the chassis tab follower. The swapped-in part carries the prefab's genuine internal
+      hole pattern, so its DXF is real and needs no suppression.
+    * `resize_fitted` — nothing in the 7-part catalogue spans the glass (a 90in mirror needs a
+      ~58in hanger and the widest prefab is 20in). There is nothing to swap in, so the fitted
+      hanger is stretched via `changes` exactly as before.
+
+    `keep_fitted` writes nothing at all: a bespoke hanger already in band is never traded for a
+    catalogue part. Additive field — older app builds simply ignore the whole block.
     """
     part: str | None = None            # e.g. "1333"
-    part_name: str = ""                # e.g. "1333-HANGER"
+    part_name: str = ""                # e.g. "1333-HANGER" — the library file's stem
     fraction: float = 0.0              # chosen area / glass area
     in_band: bool = False              # inside the ideal 20-25%
     under_target: bool = False         # below 20% — accepted, but worth showing
@@ -74,9 +82,17 @@ class HangerSelection(BaseModel):
     needs_review: bool = False         # nothing suitable — a human should look
     keep_fitted: bool = False           # the fitted hanger was already in band; nothing written
     resize_fitted: bool = False         # no prefab qualified; the fitted hanger was scaled
+    # Swap the placed hanger for `part_name` out of the app's prefab library. Mutually
+    # exclusive with `keep_fitted`/`resize_fitted`, and never set together with hanger
+    # dimension writes — the prefab file already IS the right size.
+    replace: bool = False
     reason: str = ""
-    width_dim: str = ""                # dim written with the catalogue width
-    height_dim: str = ""               # dim written with the catalogue height
+    width_dim: str = ""                # hanger width driver (informational when `replace`)
+    height_dim: str = ""               # hanger height driver (informational when `replace`)
+    # Catalogue size of the chosen prefab, so the app can sanity-check the swapped-in file
+    # really is the part the selector reasoned about.
+    target_width_meters: float = 0.0
+    target_height_meters: float = 0.0
     # Chassis dims shifted to keep tracking the hanger width (the HANGING TAB spacing, so
     # the tabs stay seated in the hanger's slots).
     follower_dims: list[str] = []

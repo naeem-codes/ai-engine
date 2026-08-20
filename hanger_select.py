@@ -41,7 +41,7 @@ PREFAB_HANGERS: list[tuple[str, float, float]] = [
     ("1119", 14.25, 15.0),
     ("1038", 20.00, 15.0),
     ("1333", 14.25, 24.0),
-    ("1215", 12.00, 40.0),
+    ("1215", 40.00, 12.0),
 ]
 
 # ── Chassis dims that must TRACK the hanger width ─────────────────────────────

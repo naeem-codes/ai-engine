@@ -35,6 +35,16 @@ def test_the_width_floor_reproduces_the_clients_own_products():
 
 
 def test_legend_matches_the_client_sheet():
+    """Sizes as the parts are PLACED — the sheet's order for six of the seven.
+
+    #1215 is deliberately 40x12, NOT the 12x40 the sheet prints. Measured off the placed
+    component (2026-08-18): every other prefab's assembly bounding box matches the sheet in
+    order — #1038 508.00x381.00 = 20x15, #1417 304.80x190.50 = 12x7.5, #1169 304.80x330.20 =
+    12x13, #1333 361.95x609.60 = 14.25x24 (portrait, and correct) — while #1215 comes in at
+    1016.00x304.80 mm = 40x12. It is the one part authored with its long axis where the rest of
+    the family puts its width, so it hangs LANDSCAPE. Listed as 12x40 it was picked for tall
+    narrow glass and then fitted 40" across an 18" mirror. Do not "correct" this back.
+    """
     assert dict((p, (w, h)) for p, w, h in PREFAB_HANGERS) == {
         "1417": (12.00, 7.5),
         "1004": (14.25, 10.0),
@@ -42,7 +52,7 @@ def test_legend_matches_the_client_sheet():
         "1119": (14.25, 15.0),
         "1038": (20.00, 15.0),
         "1333": (14.25, 24.0),
-        "1215": (12.00, 40.0),
+        "1215": (40.00, 12.0),
     }
 
 
@@ -80,8 +90,13 @@ def test_amber_36x48_takes_1333_and_refuses_to_overshoot_to_1215():
     assert choice.part == "1333"
     assert choice.fraction == pytest.approx(342 / 1728)      # 19.79%
     assert choice.under_target is True
-    assert [c.part for c in choice.rejected_oversize] == ["1215"]
-    assert choice.rejected_oversize[0].fraction == pytest.approx(480 / 1728)  # 27.78%
+    # #1215 is still refused, but on GEOMETRY rather than area now that it is known to be
+    # 40x12: 40" cannot span a 36" glass, so it never reaches the area comparison at all.
+    # `rejected_oversize` lists only prefabs that FIT and were passed over, hence empty.
+    c1215 = next(c for c in choice.candidates if c.part == "1215")
+    assert c1215.fits is False
+    assert c1215.eligible is False
+    assert choice.rejected_oversize == []
 
 
 # ── the ceiling is the binding constraint ─────────────────────────────────────
@@ -132,13 +147,22 @@ def test_jen_keeps_its_bespoke_hanger_which_is_already_in_band():
     assert (choice.target_width_in, choice.target_height_in) == (30, 15)
 
 
-def test_1215_is_rejected_on_the_height_cap_for_jen():
-    # Its AREA was in band (23.13%) and it "fit" (40 <= 41.5) — only the height cap stops it.
-    c = next(c for c in select_hanger(50, 41.5).candidates if c.part == "1215")
-    assert c.fits is True
-    assert c.fraction == pytest.approx(480 / 2075)      # 23.13%, inside the band
-    assert c.too_tall is True
-    assert c.eligible is False
+def test_1215_is_not_what_jen_gets():
+    """The JEN 50x41.5 failure, re-pinned to the part's real 40x12 orientation.
+
+    The overflow existed ONLY because the part was recorded 12x40, which stood it on end: 40" on
+    a 41.5" glass is 96% of the height. At its true 40x12 the height is a harmless 29% and a
+    40-wide hanger on a 50" mirror is a sensible part — so the height cap is no longer what saves
+    JEN, and asserting that it is would pin a falsehood. What actually saves JEN is `keep_fitted`:
+    its bespoke 30x15 is 21.69%, in band, and is left alone.
+    """
+    kept = select_hanger(50, 41.5, fitted_w_in=30, fitted_h_in=15)
+    assert kept.keep_fitted is True
+    assert kept.part is None
+
+    c = next(c for c in kept.candidates if c.part == "1215")
+    assert c.fraction == pytest.approx(480 / 2075)      # 23.13% — in band either way
+    assert c.too_tall is False                          # 12" is 29% of the height, not 96%
 
 
 def test_the_height_cap_does_not_break_the_approved_amber_choice():
@@ -350,5 +374,5 @@ def test_log_lines_cover_every_candidate_and_mark_the_choice():
     lines = select_hanger(36, 48).log_lines()
     assert len(lines) >= 1 + len(PREFAB_HANGERS)
     assert any("CHOSEN" in ln and "#1333" in ln for ln in lines)
-    # #1215 is 40" tall on a 48" glass = 83%, so the height cap rejects it before area does.
-    assert any("too tall" in ln and "#1215" in ln for ln in lines)
+    # #1215 is 40" WIDE, so on a 36" glass it simply does not fit.
+    assert any("does not fit" in ln and "#1215" in ln for ln in lines)
