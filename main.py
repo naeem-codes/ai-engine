@@ -34,6 +34,7 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest, DrawingPlanRequest, DrawingPlanResponse
+from pydantic import BaseModel, ConfigDict
 from interpret import interpret as run_interpret
 from generate_rules import generate_rules as run_generate_rules
 from generate_drawing_plan import generate_drawing_plan as run_drawing_plan
@@ -178,6 +179,37 @@ async def save_rules_endpoint(req: SaveRulesRequest):
     key = store.save_for_model(req.model_path, doc)
     pushed = await cloud_sync.push(key, store.read_key(key) or doc)
     return {"saved": str(store._key_path(key)), "model_key": key,
+            "family": store.family_of(req.model_path),
+            "synced": pushed, "sync_enabled": cloud_sync.enabled()}
+
+
+class ForkRulesRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    model_path: str | None = None
+    # old FILE STEM -> new, e.g. {"12393-CHASSIS": "6666-CXP-CUSTOM-CHAS"}. Stems, not component
+    # instance ids: one file can have many instances, and a nested component's instance name is a
+    # slashed path ("12392-CHASSIS-ASSY-1/6666-…-2") that no dim name ever carries.
+    stem_map: dict[str, str] = {}
+
+
+@app.post("/fork-rules")
+async def fork_rules(req: ForkRulesRequest):
+    """Copy the model's rule set with renamed component ids, never touching the original.
+
+    Called by the app right after it renames part files. The rules name every dim by component
+    instance, so a rename silently breaks them: a renamed dependent stops resizing, a renamed
+    master makes the set unusable outright.
+
+    Same save-then-push pairing as /save-rules — deliberately NOT reusing that endpoint, which
+    goes through `save_for_model` and would overwrite the original in place.
+    """
+    result = store.fork_with_renamed_components(req.model_path, req.stem_map)
+    if result is None:
+        return {"forked": False, "reason": "nothing to fork — no rule set, or none of the "
+                                           "renamed components appear in it"}
+    key, doc = result
+    pushed = await cloud_sync.push(key, doc)
+    return {"forked": True, "model_key": key, "saved": str(store._key_path(key)),
             "family": store.family_of(req.model_path),
             "synced": pushed, "sync_enabled": cloud_sync.enabled()}
 

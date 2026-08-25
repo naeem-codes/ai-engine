@@ -49,6 +49,12 @@ class InterpretRequest(BaseModel):
     master_height_dim: str | None = None
     mate_positions: list[MatePositionIn] = []
     slot_rows: list[SlotRowIn] = []
+    # What each component DECLARES itself to be ("12393-CHASSIS-2" -> "CHASSIS"), read from the
+    # part's `PartType` custom property. Empty for a model nobody has stamped, in which case the
+    # policy falls back to matching keywords in the component id exactly as before. Exists because
+    # renaming a part can delete the keyword the policy identifies it by, silently switching off
+    # whichever guard depended on it.
+    component_types: dict[str, str] = {}
 
 
 class DimensionChange(BaseModel):

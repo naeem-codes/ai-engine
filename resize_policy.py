@@ -125,6 +125,50 @@ _MIRROR_ID_PATTERNS = ("MIRROR",)
 _MIRROR_LABEL_PATTERNS = ("MIRROR GLASS",)
 
 
+# ── DECLARED part type, which beats guessing from the name ────────────────────────────────
+#
+# Everything below identifies a part by finding a keyword in its component id. That works only
+# while the id keeps the keyword, and renaming is allowed to remove it: a chassis renamed
+# `Custom-Chasis-12323` (one S) stops matching "CHASSIS", `is_chassis` returns False, and the
+# hanger's chassis-width cap silently switches off. No error, no warning — the guard just goes.
+#
+# So a part may DECLARE what it is, in a `PartType` custom property the app stamps when it
+# renames one (at which point it still knows, from the name it is about to destroy). The
+# declaration wins; the keyword match stays as the fallback for every part nobody has renamed,
+# which by definition still has its original keyword-bearing name. An empty map therefore
+# behaves exactly as before.
+#
+# This is NOT the label-matching that was rejected in `_hits` below. That was the LLM's prose,
+# regenerated non-deterministically on every rule generation. This is a fixed vocabulary written
+# once by the app.
+PART_TYPES: tuple[str, ...] = (
+    "CHASSIS", "HANGER", "MIRROR", "LED_STRIP", "CLIP", "BRACKET", "PSU",
+)
+
+# FIXED_SIZE is keyed by a human "kind"; map those onto the declared vocabulary.
+_KIND_TO_TYPE: dict[str, str] = {
+    "power supply": "PSU",
+    "clip": "CLIP",
+    "bracket": "BRACKET",
+    "hanger": "HANGER",
+}
+
+
+def declared_type(dim_name: str, types: dict[str, str] | None) -> str:
+    """The part type this component declares, or "" when it declares nothing."""
+    t = (types or {}).get(component_of(dim_name), "")
+    return t.strip().upper().replace(" ", "_")
+
+
+def _is_kind(dim_name: str, kind: str, patterns: tuple[str, ...],
+             types: dict[str, str] | None) -> bool:
+    """Declared type if there is one, else the keyword match."""
+    d = declared_type(dim_name, types)
+    if d:
+        return d == kind
+    return _hits(dim_name, patterns)
+
+
 def _hits(dim_name: str, patterns: tuple[str, ...]) -> bool:
     """Match patterns against the component ID only — NEVER the friendly label.
 
@@ -162,8 +206,17 @@ def label_suggests_fixed_size(dim_name: str,
 
 
 def fixed_size_reason(dim_name: str,
-                      component_labels: dict[str, str] | None = None) -> str | None:
+                      component_labels: dict[str, str] | None = None,
+                      types: dict[str, str] | None = None) -> str | None:
     """Why this dim must never be resized on ANY axis, or None if it may resize."""
+    d = declared_type(dim_name, types)
+    if d:
+        # A declaration is the whole answer: it says what the part IS, so a part declared
+        # something else is NOT fixed-size no matter what its name happens to contain.
+        for kind, _patterns, reason in FIXED_SIZE:
+            if _KIND_TO_TYPE.get(kind) == d:
+                return reason
+        return None
     for _kind, patterns, reason in FIXED_SIZE:
         if _hits(dim_name, patterns):
             return reason
@@ -171,11 +224,12 @@ def fixed_size_reason(dim_name: str,
 
 
 def is_led_strip(dim_name: str,
-                 component_labels: dict[str, str] | None = None) -> bool:
+                 component_labels: dict[str, str] | None = None,
+                 types: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to an LED strip."""
-    if fixed_size_reason(dim_name, component_labels):
+    if fixed_size_reason(dim_name, component_labels, types):
         return False          # fixed-size wins (e.g. an LED BRACKET is not a strip)
-    return _hits(dim_name, LED_STRIP)
+    return _is_kind(dim_name, "LED_STRIP", LED_STRIP, types)
 
 
 def is_led_cross_section(dim_name: str, value_meters: float,
@@ -216,7 +270,7 @@ def is_mate_dim(dim_name: str) -> bool:
     return bool(_MATE_DIM_RE.match(clean))
 
 
-def is_chassis(dim_name: str) -> bool:
+def is_chassis(dim_name: str, types: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to the chassis.
 
     Not a blocking decision — the chassis is a normal resize dependent. This exists so
@@ -225,21 +279,22 @@ def is_chassis(dim_name: str) -> bool:
     overhangs the part carrying its tabs (CLARA 24x60, live 2026-08-18). Matched on the component
     id like every other check here, never on the LLM's friendly label.
     """
-    return _hits(dim_name, ("CHASSIS",))
+    return _is_kind(dim_name, "CHASSIS", ("CHASSIS",), types)
 
 
 def is_hanger(dim_name: str,
-              component_labels: dict[str, str] | None = None) -> bool:
+              component_labels: dict[str, str] | None = None,
+              types: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to the hanger.
 
     The hanger is in FIXED_SIZE so no resize RULE can scale it, but it is not truly fixed:
     it is re-selected from the prefab matrix by glass area and then written to that prefab's
     exact catalogue dims. `interpret._hanger_changes` uses this to find the dims to write.
     """
-    return _hits(dim_name, ("HANGER",))
+    return _is_kind(dim_name, "HANGER", ("HANGER",), types)
 
 
-def is_clip(name: str) -> bool:
+def is_clip(name: str, types: dict[str, str] | None = None) -> bool:
     """True for a mirror clip, given EITHER a dim name or a bare component id.
 
     Unlike the blocking checks this accepts a bare id ("1005-CLIP-1"), because mate positions
@@ -249,11 +304,15 @@ def is_clip(name: str) -> bool:
     Clips stay FIXED_SIZE; this never unfreezes one. It exists so a clip's POSITION mate can be
     lined up with the chassis hanging tabs, which is a placement decision, not a resize.
     """
+    d = declared_type(name, types) or declared_type(f"x [{name}]", types)
+    if d:
+        return d == "CLIP"
     return "CLIP" in _norm(component_of(name) or name)
 
 
 def is_mirror_glass(dim_name: str,
-                    component_labels: dict[str, str] | None = None) -> bool:
+                    component_labels: dict[str, str] | None = None,
+                    types: dict[str, str] | None = None) -> bool:
     """True if this dim belongs to the mirror glass (the only legal rule master).
 
     This one DOES consult the friendly label, unlike the blocking checks. The asymmetry is
@@ -261,8 +320,11 @@ def is_mirror_glass(dim_name: str,
     freeze it (restrictive). A wrong master is caught immediately — the whole assembly
     resizes off the wrong dim — whereas a wrongly frozen part fails silently.
     """
-    if fixed_size_reason(dim_name, component_labels):
+    if fixed_size_reason(dim_name, component_labels, types):
         return False
+    d = declared_type(dim_name, types)
+    if d:
+        return d == "MIRROR"
     comp = _norm(component_of(dim_name))
     if any(p in comp for p in _MIRROR_ID_PATTERNS):
         return True
@@ -272,7 +334,8 @@ def is_mirror_glass(dim_name: str,
 
 def block_reason(dim_name: str, axis: str,
                  component_labels: dict[str, str] | None = None,
-                 value_meters: float | None = None) -> str | None:
+                 value_meters: float | None = None,
+                 types: dict[str, str] | None = None) -> str | None:
     """Why `dim_name` must not be changed on `axis`, or None if the change is allowed.
 
     `axis` is "width" / "height"; anything else means the caller could not determine the
@@ -283,10 +346,10 @@ def block_reason(dim_name: str, axis: str,
     the conservative choice: refusing to resize a strip is recoverable, stretching its
     12.70 mm profile to mirror width is not.
     """
-    fixed = fixed_size_reason(dim_name, component_labels)
+    fixed = fixed_size_reason(dim_name, component_labels, types)
     if fixed:
         return fixed
-    if is_led_strip(dim_name, component_labels):
+    if is_led_strip(dim_name, component_labels, types):
         if value_meters is None:
             return LED_CROSS_SECTION_REASON + " (dim value unavailable — not classified)"
         if value_meters < LED_CROSS_SECTION_MAX_M:
@@ -297,6 +360,7 @@ def block_reason(dim_name: str, axis: str,
 def filter_axis_dims(dim_names: list[str], axis: str,
                      component_labels: dict[str, str] | None = None,
                      values: dict[str, float] | None = None,
+                     types: dict[str, str] | None = None,
                      ) -> tuple[list[str], list[tuple[str, str]]]:
     """Split an axis's dim list into (allowed, [(blocked_dim, reason), ...]).
 
@@ -309,7 +373,8 @@ def filter_axis_dims(dim_names: list[str], axis: str,
         # function decides SIZE-rule membership, whereas block_reason also gates the runtime
         # guard, and the offset/position mechanisms legitimately DO write mate values.
         reason = (MATE_DIM_REASON if is_mate_dim(name)
-                  else block_reason(name, axis, component_labels, (values or {}).get(name)))
+                  else block_reason(name, axis, component_labels,
+                                    (values or {}).get(name), types))
         if reason:
             blocked.append((name, reason))
         else:
