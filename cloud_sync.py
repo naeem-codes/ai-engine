@@ -379,3 +379,36 @@ async def flush_outbox() -> int:
     if sent:
         log(f"  [SYNC] flushed {sent} queued push(es)")
     return sent
+
+
+async def delete(model_key: str) -> bool:
+    """Remove one rule set from the cloud.
+
+    Needed because finalising a variant REKEYS the working set: `BREAM-24.00X36.00-LED#2`
+    becomes `BREAM-20.00X20.00-LED`, and without this the old row survives server-side and comes
+    straight back on the next `pull_family` to a new machine — a stale set naming a size that no
+    longer exists, competing for coverage against the real one.
+
+    Best-effort, like `push`. A failure here leaves a stale ROW, never a missing one, so it must
+    not turn a successful local finalise into an error the user sees. Nothing is queued: unlike a
+    push there is no document to retry with, and a delete that never lands is a tidiness problem,
+    not a data-loss one.
+    """
+    cfg = _cfg()
+    if cfg is None:
+        return False
+    try:
+        cid = await client_id(cfg)
+        if not cid:
+            raise httpx.HTTPError("no client_id available (sign-in failed or claim missing)")
+        await _request(
+            cfg, "DELETE", f"/rest/v1/{TABLE}",
+            params={"client_id": f"eq.{cid}", "model_key": f"eq.{model_key}"},
+        )
+    except httpx.HTTPError as exc:
+        log(f"  [SYNC] delete '{model_key}' failed ({type(exc).__name__}: {exc}) — "
+            f"the row stays in the cloud; local state is already correct")
+        return False
+    _outbox_path(model_key).unlink(missing_ok=True)
+    log(f"  [SYNC] deleted '{model_key}'")
+    return True

@@ -273,14 +273,24 @@ class Selection:
 def select_for_model(model_path: str | None, live_dims=None) -> Selection:
     """Pick the rule set that best fits the model now open.
 
-    Order:
-      1. THIS VERSION's own set (exact stem) — the normal case, since rules are saved per
-         version. Used even if its coverage is imperfect: the user tuned it for this model.
-      2. a SIBLING version in the same family, best dim coverage first. This is what keeps a
-         freshly-cloned size working: SaveSizedVariant renames the assembly, so a new size has
-         no set of its own, and without this tier it would fall through to LLM classification —
-         the original bug. Dependents scale by constant offset, so a sibling's rules hold at
-         another size.
+    Best DIM COVERAGE against the live model wins, and THIS VERSION's own set (exact stem) wins
+    every tie. So in the normal case — nothing renamed, its own set at 100% — it is chosen exactly
+    as before, and "the user tuned it for this model" still holds wherever the fit is equal.
+
+    A sibling only wins by describing the open model strictly better. That is what makes a fork
+    take over after a rename: renaming a part renames its component instance, every dim the
+    original set names by that instance stops existing, and the fork written alongside it names
+    the new ones. Live 2026-08-21: the exact-stem set was returned at **0/8 dims present** while
+    `CLARA-36.00X36.00#3` sat unused at 8/8 — the chassis never resized, the hanger cap silently
+    switched off for want of a chassis width, and the tab follower then wrote a 35.75" spacing
+    into a 30" chassis and aborted the rebuild.
+
+    Checking only `usable` (masters present) would not be enough: renaming a DEPENDENT leaves the
+    masters intact, so the stale set would still have won — and that is the common case.
+
+    The sibling tier also keeps a freshly-cloned size working: SaveSizedVariant renames the
+    assembly, so a new size has no set of its own. Dependents scale by constant offset, so a
+    sibling's rules hold at another size.
 
     `live_dims` empty/None means "dims unknown" — the case for /get-rules, which is only
     displaying a rule set. Coverage scoring is then skipped entirely and the newest candidate
@@ -292,11 +302,16 @@ def select_for_model(model_path: str | None, live_dims=None) -> Selection:
     scoring = bool(live_dims)
 
     exact = read_key(stem)
+    cov_exact = Coverage()
     if exact is not None:
-        cov = coverage(exact, live_dims) if scoring else Coverage()
-        log(f"  [STORE] this version's own rule set '{stem}'"
-            + (f" — {cov.present}/{cov.total} dims present" if scoring else ""))
-        return Selection(doc=exact, key=stem, source="version", cover=cov, considered=1)
+        cov_exact = coverage(exact, live_dims) if scoring else Coverage()
+        # Not scoring means the caller only wants to SHOW a rule set (/get-rules). Scoring an
+        # empty dim list would reject everything, so the model's own set is simply returned.
+        if not scoring:
+            log(f"  [STORE] this version's own rule set '{stem}' (dims not scored)")
+            return Selection(doc=exact, key=stem, source="version", cover=cov_exact, considered=1)
+        log(f"  [STORE] this version's own rule set '{stem}' — "
+            f"{cov_exact.present}/{cov_exact.total} dims present")
 
     family = family_of(model_path)
     keys = [k for k in candidate_keys(family) if k != stem]
@@ -313,16 +328,38 @@ def select_for_model(model_path: str | None, live_dims=None) -> Selection:
         scored.append((cov.fraction, mtime, key, doc, cov))
 
     if not scored:
+        if exact is not None:
+            log(f"  [STORE] keeping '{stem}' — no usable sibling in family '{family}' "
+                f"({len(keys)} candidate(s))")
+            return Selection(doc=exact, key=stem, source="version", cover=cov_exact,
+                             considered=len(keys) + 1)
         log(f"  [STORE] no rule set for '{stem}' and no usable sibling in family '{family}' "
             f"({len(keys)} candidate(s))")
         return Selection(considered=len(keys))
 
     scored.sort(key=lambda t: (t[0], t[1]), reverse=True)   # best coverage, newest breaks ties
-    _frac, _mtime, key, doc, cov = scored[0]
-    log(f"  [STORE] no set for '{stem}' — using SIBLING '{key}' from family '{family}'  "
-        + (f"({cov.present}/{cov.total} dims, {len(scored)}/{len(keys)} usable candidate(s))"
-           if scoring else f"(newest of {len(keys)} candidate(s); dims not scored)"))
-    return Selection(doc=doc, key=key, source="sibling", cover=cov, considered=len(keys))
+    frac, _mtime, key, doc, cov = scored[0]
+
+    # The exact-stem set wins every TIE, so a sibling has to be strictly better to displace it.
+    # Compared on the fraction rather than the raw count deliberately: after a rename a fork
+    # carries the same dims as its parent, so the two are directly comparable, and the fraction
+    # says "how much of what this set names actually exists".
+    if exact is not None and frac <= cov_exact.fraction:
+        log(f"  [STORE] keeping '{stem}' ({cov_exact.present}/{cov_exact.total}) — best sibling "
+            f"'{key}' covers no better ({cov.present}/{cov.total})")
+        return Selection(doc=exact, key=stem, source="version", cover=cov_exact,
+                         considered=len(keys) + 1)
+
+    if exact is not None:
+        log(f"  [STORE] SIBLING '{key}' ({cov.present}/{cov.total} dims) beats this version's own "
+            f"'{stem}' ({cov_exact.present}/{cov_exact.total}) — using it. The renamed model is "
+            f"described by the fork, not by the set it was forked from.")
+    else:
+        log(f"  [STORE] no set for '{stem}' — using SIBLING '{key}' from family '{family}'  "
+            + (f"({cov.present}/{cov.total} dims, {len(scored)}/{len(keys)} usable candidate(s))"
+               if scoring else f"(newest of {len(keys)} candidate(s); dims not scored)"))
+    return Selection(doc=doc, key=key, source="sibling", cover=cov,
+                     considered=len(keys) + (1 if exact is not None else 0))
 
 
 # ── saving ────────────────────────────────────────────────────────────────────
@@ -415,3 +452,196 @@ def bootstrap() -> dict:
     if migrated or seeded:
         log(f"  [STORE] bootstrap: migrated={len(migrated)} seeded={len(seeded)} total={total}")
     return {"migrated": migrated, "seeded": seeded, "total": total, "data_dir": str(data_dir())}
+
+
+# ── forking a rule set after a component rename ───────────────────────────────
+
+# The single working rule set per model. Not a counter: one file, rewritten on every rename.
+WORKING_SUFFIX = "#2"
+
+
+def fork_with_renamed_components(model_path: str | None,
+                                 stem_map: dict[str, str]) -> tuple[str, dict] | None:
+    """Copy this model's rule set with component ids substituted, under a NEW key.
+
+    Renaming a part renames its component instance, and the rules name every dim by that
+    instance (`D1@Sketch1 [12393-CHASSIS-2]`). So after a rename the set no longer describes the
+    model: a renamed DEPENDENT quietly stops resizing, and a renamed MASTER makes the whole set
+    unusable — `select_for_model` rejects a set whose master dim is absent.
+
+    ONE working file per model, updated in place. The first rename copies the original to
+    `<stem>#2`; every rename after that rewrites `#2` itself, so `#3`, `#4`, ... are never
+    created. Two reasons that is not just tidiness:
+
+      * Chaining. A second rename has to build on the names the FIRST one produced. Forking from
+        the original again would apply only the newest substitution and silently drop the earlier
+        ones, leaving a set that describes neither the old model nor the new one.
+      * Accumulation. Names change on essentially every resize, so a file per rename is a file
+        per resize, for ever.
+
+    The original is still never touched — it describes every un-renamed assembly built from the
+    same product, and overwriting it would break those to fix this one.
+
+    Nothing has to be told which set to use afterwards: `select_for_model` picks by dim coverage
+    against the live model, so the fork wins as soon as the original's ids are the ones missing.
+
+    Keyed on FILE STEMS, not component instance ids. One file can hold several instances --
+    renaming `Zortech-Low-Profile-1900-Lumens` renames all four LED strips -- so an id-keyed map
+    caught only one of them and left the rest naming a component that no longer exists. A nested
+    component's instance name is also a slashed path
+    (`12392-CHASSIS-ASSY-1/6666-CXP-CUSTOM-CHAS-2`) which no dim name carries. Substituting
+    `[<oldstem>-` -> `[<newstem>-` avoids both (live 2026-08-21).
+
+    Returns (key, doc), or None when there is nothing to fork or nothing would change.
+    """
+    if not stem_map:
+        return None
+
+    stem = stem_of(model_path) or family_of(model_path)
+    if not stem:
+        return None
+    key = f"{stem}{WORKING_SUFFIX}"
+
+    # Base on the WORKING set when there is one, so each rename builds on the last. Reading it
+    # directly rather than through select_for_model: that helper is coverage-driven and gets no
+    # live dims here, so it would hand back the exact-stem original and undo every earlier rename.
+    doc = read_key(key)
+    origin = key
+    if doc is None:
+        sel = select_for_model(model_path)
+        doc = getattr(sel, "doc", None)
+        origin = sel.key
+    if not isinstance(doc, dict):
+        return None
+
+    # Anchored on the opening bracket AND on the instance number that closes the id, so it
+    # matches every instance of the file and nothing that merely contains the stem as a prefix.
+    #
+    # The instance number is what makes this IDEMPOTENT, and idempotence is the whole point.
+    # A bare `[{old}-` -> `[{new}-` replace is correct exactly once. But this function reads the
+    # WORKING set so renames chain, and a rename usually APPENDS ("12393-CHASSIS" ->
+    # "12393-CHASSIS-KUCHU-PUCHU", "…-REV-B", any suffix at all) — so the already-renamed
+    # `[12393-CHASSIS-KUCHU-PUCHU-2]` still starts with `[12393-CHASSIS-` and got renamed a
+    # SECOND time into `[12393-CHASSIS-KUCHU-PUCHU-KUCHU-PUCHU-2]`. Requiring `\d+]` after the
+    # separator refuses that: "KUCHU-PUCHU-2" is not an instance number.
+    #
+    # Live 2026-08-25: it cost the chassis WIDTH dim, which then never resized. The hanger cap
+    # reads that same dim and silently switched off, a 20" prefab was chosen for a 10" chassis,
+    # and the tab follower wrote a 15.75" spacing into it — `HANGING TAB LOCATIONS` failed,
+    # Sketch82 lost the geometry it was drawn on, and the resize aborted.
+    subs = {re.compile(r"\[" + re.escape(old) + r"-(?=\d+\])"): f"[{new}-"
+            for old, new in stem_map.items() if old and new and old != new}
+    if not subs:
+        return None
+
+    def swap(text: str) -> str:
+        for rx, b in subs.items():
+            text = rx.sub(b, text)
+        return text
+
+    def walk(node):
+        if isinstance(node, str):
+            return swap(node)
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, dict):
+            # KEYS too: component_labels is keyed by the bare component id, no brackets -- so it
+            # needs a PREFIX swap ("12393-CHASSIS-2" -> "6666-CXP-CUSTOM-CHAS-2") rather than the
+            # bracketed one the dim names use. Same instance-number guard as `subs` above, for
+            # the same reason: without it "12393-CHASSIS-KUCHU-PUCHU-2" starts with
+            # "12393-CHASSIS-" and gets renamed a second time on the next rename.
+            out = {}
+            for k, v in node.items():
+                nk = k
+                if isinstance(k, str):
+                    for old, new in stem_map.items():
+                        if (old and new and old != new and k.startswith(f"{old}-")
+                                and k[len(old) + 1:].isdigit()):
+                            nk = new + k[len(old):]
+                            break
+                out[nk] = walk(v)
+            return out
+        return node
+
+    forked = walk(json.loads(json.dumps(doc)))
+    if forked == doc:
+        return None                       # the rename touched nothing this set references
+
+    forked["model"] = stem
+    forked["family"] = family_of(model_path)
+    forked["variant"] = WORKING_SUFFIX
+    forked["generated_for"] = stem
+    forked["forked_from"] = stem
+    write_key(key, forked)
+    what = "updated" if origin == key else f"created from '{origin}'"
+    log(f"  [STORE] working rule set '{key}' {what}; renamed "
+        + ", ".join(f"{a}→{b}" for a, b in stem_map.items() if a != b))
+    return key, forked
+
+
+def delete_key(key: str) -> bool:
+    """Remove one stored rule set. Returns False when there was nothing there."""
+    p = _key_path(key)
+    try:
+        if not p.exists():
+            return False
+        p.unlink()
+        return True
+    except OSError as exc:
+        log(f"  [STORE] could not delete '{key}': {exc}")
+        return False
+
+
+def finalize_working_set(model_path: str | None) -> tuple[str, str, str] | None:
+    """Rename the working rule set to the model's CURRENT size, once a variant is finished.
+
+    Through the whole resize / rename / build / review cycle the working set is `<old>#2` —
+    deliberately, so nothing is renamed while the result might still be discarded. Export is the
+    point the variant becomes real: the PDFs and DXFs are written, the folder, the assembly, the
+    drawings and the outputs all carry the new size. The rules should say the same thing rather
+    than keep naming a size that no longer exists anywhere on disk.
+
+    Rekeying also upgrades the match from a heuristic to an exact one. Until now the set was
+    found as a SIBLING on best coverage; afterwards it is the model's own `<stem>` key.
+
+    The source is located by its `#2` suffix within the family, not passed in, because by the time
+    Export runs the app no longer knows the stem the fork was made under — `SaveSizedVariant`
+    renamed the assembly out from under it.
+
+    Returns (old_key, new_key, note) or None when there is nothing to do. Refuses — returning a
+    note rather than acting — when the target key already exists: that would be a previous
+    variant's tuned rules, and silently overwriting them is worse than leaving `#2` in place.
+    """
+    stem = stem_of(model_path)
+    if not stem:
+        return None
+    family = family_of(model_path)
+
+    working = [k for k in candidate_keys(family) if k.endswith(WORKING_SUFFIX)]
+    if not working:
+        return None                       # nothing was ever forked, or it is already finalised
+    old_key = working[0]
+    if old_key == stem:
+        return None                       # would be a no-op
+
+    doc = read_key(old_key)
+    if doc is None:
+        return None
+
+    if _key_path(stem).exists():
+        note = (f"'{stem}' already has its own rule set — keeping '{old_key}' rather than "
+                f"overwriting rules that were tuned for an earlier variant of this size")
+        log(f"  [STORE] finalise REFUSED: {note}")
+        return old_key, old_key, note
+
+    doc = dict(doc)
+    doc["model"] = stem
+    doc["family"] = family
+    doc["variant"] = stem
+    doc["generated_for"] = stem
+    doc.pop("forked_from", None)          # it is no longer a fork of anything; it IS the set
+    write_key(stem, doc)
+    delete_key(old_key)
+    note = f"renamed '{old_key}' → '{stem}' to match the exported size"
+    log(f"  [STORE] finalise: {note}")
+    return old_key, stem, note

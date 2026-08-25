@@ -93,6 +93,26 @@ are now listed in the chat explanation via `Selection.warning`, because the old 
 silent: unknown deps were skipped with only a log line, so an under-grown frame looked like a
 resize bug.
 
+### The working set — `#2` while a variant is provisional
+
+Renaming a part after a resize invalidates every rule that names it, so `fork_with_renamed_components`
+writes the renamed copy to `<stem>#2` and leaves the original alone: it still describes every
+un-renamed assembly of the product. There is only ever ONE working set — the next rename reads `#2`
+and updates it in place, never `#3`. It is deliberately based on `read_key("<stem>#2")` and not on
+`select_for_model`, which needs live dims to score and would otherwise fork the ORIGINAL a second
+time.
+
+`finalize_working_set` ends that state: on a successful **export** (`POST /finalize-rules`, step 2 in
+the app, and nowhere else) `BREAM-24.00X36.00-LED#2` is MOVED to `BREAM-20.00X20.00-LED` — the size
+the folder, the assembly, the drawings and the PDFs all now carry. Doing it at export and not at the
+rename is the point: the review window between the two stages is where a variant gets abandoned, and
+an abandoned one must leave no renamed set behind. The source is found by its `#2` suffix within the
+family rather than passed in, because by then `SaveSizedVariant` has renamed the assembly and the app
+no longer knows the stem it forked under. It **refuses** when the target key already exists — that is
+a previous variant's tuned rules, and keeping a `#2` name is far cheaper than overwriting them. The
+rekey also pushes the new key and DELETES the old cloud row (`cloud_sync.delete`), or a `pull_family`
+onto a new machine would restore a set naming a size that no longer exists.
+
 `family_from_stem()` exists separately from `family_of()` for a real trap: these stems contain
 dots as part of the size, so `Path("KELLY-24.00X48.00-LED").stem` chops at the last dot and
 yields family `KELLY`. Only a real path may go through `Path.stem`. The same derivation is

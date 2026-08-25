@@ -115,7 +115,8 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         identically on AMBER's 20x15 hanger AND AMY's 23x17 one, so it cannot be a size.
         """
         cands = [(current[d.name], d.name) for d in req.dimensions
-                 if labels.get(d.name) == axis and policy.is_hanger(d.name, component_labels)
+                 if labels.get(d.name) == axis
+                 and policy.is_hanger(d.name, component_labels, req.component_types)
                  and "@SHEET-METAL" not in d.name.upper()]
         return max(cands)[1] if cands else None
 
@@ -142,12 +143,41 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
     # by the labeler at generation time, so use its answer. Missing (0) disables the cap rather
     # than rejecting everything.
     chassis_w = max(
-        (master_value(dim) for dim in (width_deps or []) if policy.is_chassis(dim)),
+        (master_value(dim) for dim in (width_deps or [])
+         if policy.is_chassis(dim, req.component_types)),
         default=0.0)
     if chassis_w > 0:
         log(f"  [HANGER] chassis width after this resize: {chassis_w / 0.0254:.3f}\"")
     else:
-        log("  [HANGER] no chassis width in the width rule - hanger not capped against it")
+        # FALLBACK to the live model when the rule set cannot supply it. The rules are the
+        # better source and stay first, but "rules could not answer" must not mean "no cap":
+        # `chassis_w_in=0` disables the check inside select_hanger, so the one guard between a
+        # wide prefab and a narrow chassis switched off exactly when its input went missing.
+        # Live 2026-08-25: a rename left the chassis width dep under a component id that no
+        # longer existed, the cap vanished, a 20" #1038 was chosen for a 10" chassis, and the
+        # tab follower wrote 15.75" into it — the rebuild aborted on HANGING TAB LOCATIONS.
+        #
+        # "Largest [W] dim on a chassis" is rejected as the PRIMARY source further up, and
+        # rightly: the chassis also carries the hanging-tab dims on the W axis, so a bare max()
+        # caps the hanger against the TAB SPACING — the very thing the hanger is meant to be
+        # driving. On AMBER 36x36, whose rules carry no chassis width at all, that reads 15.75"
+        # and rejects the 20" #1038 the client actually built.
+        #
+        # So the tab dims are excluded, by the same hint list that identifies the follower, and
+        # the two cannot drift apart. What is left is a genuine chassis width or nothing —
+        # nothing being the old no-cap behaviour, which is right when there is truly no evidence.
+        chassis_w = max(
+            (master_value(d.name) for d in req.dimensions
+             if labels.get(d.name) == "W"
+             and policy.is_chassis(d.name, req.component_types)
+             and not any(hint in d.name.upper()
+                         for hint in hanger_select.HANGER_FOLLOWER_HINTS)),
+            default=0.0)
+        if chassis_w > 0:
+            log(f"  [HANGER] chassis width missing from the width rule; capped instead against "
+                f"the largest [W] chassis dim in the live model: {chassis_w / 0.0254:.3f}\"")
+        else:
+            log("  [HANGER] no chassis width anywhere - hanger not capped against it")
 
     choice = select_hanger_meters(glass_w, glass_h,
                                   fitted_w_in=fitted_w / 0.0254,
@@ -266,7 +296,7 @@ def _frost_follower_updates(req: InterpretRequest, changes: list[DimensionChange
 
     # LED strip LENGTH dims moved this turn (cross-sections are excluded by the policy).
     strips = [(n, current.get(n, 0.0), v) for n, v in applied.items()
-              if policy.is_led_strip(n, component_labels)
+              if policy.is_led_strip(n, component_labels, req.component_types)
               and not policy.is_led_cross_section(n, current.get(n, 0.0), component_labels)
               and current.get(n, 0.0) > 0]
     if not strips:
@@ -280,7 +310,7 @@ def _frost_follower_updates(req: InterpretRequest, changes: list[DimensionChange
         for d in req.dimensions:
             if d.name in applied or d.name in seen:
                 continue
-            if not policy.is_mirror_glass(d.name, component_labels):
+            if not policy.is_mirror_glass(d.name, component_labels, req.component_types):
                 continue
             if labels.get(d.name) in ("W", "H", "D"):
                 continue          # an axis driver — already handled as master/dependent
@@ -378,7 +408,7 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         # A clip lines up with the hanging tabs when those moved — same load path, and it
         # replaces the edge offset rather than adjusting it.
         tab_half = _clip_tab_alignment(hanger, changes) if mate.axis == "W" else None
-        if tab_half and policy.is_clip(mate.component):
+        if tab_half and policy.is_clip(mate.component, req.component_types):
             log(f"  [MATE] {mate.dim} aligned to the hanging tabs at "
                 f"{tab_half / 0.0254:.3f}\" (was heading for {new_val / 0.0254:.3f}\")")
             new_val = tab_half
@@ -512,7 +542,7 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
         upper = d.name.upper()
         if not any(hint in upper for hint in hanger_select.HANGER_FOLLOWER_HINTS):
             continue
-        if policy.is_hanger(d.name, None):
+        if policy.is_hanger(d.name, None, req.component_types):
             continue                      # the hanger's own dims are handled above
         if d.name in seen:
             continue                      # the dim dump lists every dim twice
@@ -543,6 +573,7 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
         if new_val <= 0:
             log(f"  [HANGER] follower {d.name} SKIPPED — would go to {new_val * 1000:.2f} mm")
             continue
+
         drift_in = abs(inset_in - hanger_select.EXPECTED_TAB_INSET_IN)
         if drift_in > 0.005:
             log(f"  [HANGER] follower {d.name} inset CORRECTED from {inset_in:.3f}\" to "
@@ -657,6 +688,7 @@ def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
                     component_labels: dict[str, str] | None,
                     axis_hint: str = "",
                     current: dict[str, float] | None = None,
+                    types: dict[str, str] | None = None,
                     ) -> tuple[list[DimensionChange], list[str]]:
     """Drop any change that resize_policy forbids. Returns (kept, [reason lines]).
 
@@ -675,7 +707,7 @@ def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
         lbl = (labels or {}).get(c.name, "")
         axis = "width" if lbl == "W" else "height" if lbl == "H" else axis_hint
         reason = policy.block_reason(c.name, axis, component_labels,
-                                    (current or {}).get(c.name))
+                                     (current or {}).get(c.name), types)
         if reason:
             log(f"    [POLICY] DROP {c.name} ({c.value_meters * 1000:.2f} mm) — {reason}")
             notes.append(f"{c.name}: {reason}")
@@ -799,7 +831,8 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         dim_values = {d.name: d.value_meters for d in req.dimensions}
         target_block = policy.block_reason(if_changes, trigger,
                                            model_rules.component_labels,
-                                           dim_values.get(if_changes))
+                                           dim_values.get(if_changes),
+                                           req.component_types)
         if target_block:
             log(f"  [POLICY] REFUSE target {if_changes!r} — {target_block}")
             return InterpretResponse(error=f"Cannot resize {if_changes} — {target_block}.")
@@ -850,12 +883,35 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 log(f"    [OFFSET] {off_dim} = {off_val*1000:.2f} mm (linked to source + offset)")
                 changes.append(DimensionChange(name=off_dim, value_meters=off_val))
 
+        # A rule set can name a dim this model does not have — a stale set, or one whose
+        # component ids no longer match after a rename. `selection.warning` already tells the
+        # user those were "left unchanged", but until now nothing MADE that true: the change
+        # list still carried them all the way to the app, whose resolver dropped the
+        # unmatched `[ComponentId]` and wrote the value to whatever bare dim name matched
+        # instead. Live 2026-08-25: 60" bound for the mirror landed on a 1" dim.
+        #
+        # Filtered HERE, before the followers, so frost/slots/hanger/mates never read a size
+        # that was never going to be applied.
+        known = ({d.name for d in req.dimensions}
+                 | {m.dim for m in req.mate_positions}
+                 | {s.dim for s in req.slot_rows})
+        unknown = [c.name for c in changes if c.name not in known]
+        if unknown:
+            changes = [c for c in changes if c.name in known]
+            for name in unknown:
+                log(f"    [DROP] {name} — no such dimension in this model")
+            if not changes:
+                return InterpretResponse(error=(
+                    f"None of the dimensions in rule set '{selection.key or 'in use'}' exist "
+                    f"in this model ({len(unknown)} checked), so there is nothing to resize. "
+                    "Click ⚙ Generate Rules to rebuild the rules for this version."))
+
         # Final policy guard — a stale rules file (generated before the fixed-size
         # policy) can still list a clip/bracket/power-supply dim in also_change, and
         # expand_positions/expand_offsets can add one too. Nothing gets past here.
         changes, dropped = _enforce_policy(changes, req.dim_axis_labels,
                                            model_rules.component_labels, trigger,
-                                           current_dims)
+                                           current_dims, req.component_types)
         if not changes:
             return InterpretResponse(error="Every dimension in this change is fixed-size "
                                            "hardware that cannot be resized.")

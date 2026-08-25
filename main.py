@@ -214,6 +214,35 @@ async def fork_rules(req: ForkRulesRequest):
             "synced": pushed, "sync_enabled": cloud_sync.enabled()}
 
 
+class FinalizeRulesRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    model_path: str | None = None
+
+
+@app.post("/finalize-rules")
+async def finalize_rules(req: FinalizeRulesRequest):
+    """Rekey the working rule set to the model's current size. Called after a successful export.
+
+    `<old>#2` carries the variant through resize, rename, build and review; Export is the point
+    it becomes real, so the rules take the size the deliverables were written under. Doing it
+    only here means a variant that is built and then discarded leaves no renamed rule set behind.
+    """
+    result = store.finalize_working_set(req.model_path)
+    if result is None:
+        return {"finalized": False, "reason": "no working rule set to rename"}
+
+    old_key, new_key, note = result
+    if old_key == new_key:
+        return {"finalized": False, "reason": note, "model_key": old_key}
+
+    pushed = await cloud_sync.push(new_key, store.read_key(new_key) or {})
+    # Drop the old row too, or a pull onto a new machine restores a set naming a size that no
+    # longer exists. Best-effort: a stale row is untidy, a missing local set would not be.
+    await cloud_sync.delete(old_key)
+    return {"finalized": True, "old_key": old_key, "model_key": new_key, "reason": note,
+            "synced": pushed, "sync_enabled": cloud_sync.enabled()}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))

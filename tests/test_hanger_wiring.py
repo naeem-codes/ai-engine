@@ -65,10 +65,11 @@ def rules_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-async def _resize(rules_dir, if_changes, target_in, dims=None):
+async def _resize(rules_dir, if_changes, target_in, dims=None, axis=None, also=None):
     llm = json.dumps({
         "rule": {"if_changes": if_changes,
-                 "also_change": [CHASSIS_H] if if_changes == MIRROR_H else []},
+                 "also_change": also if also is not None else (
+                     [CHASSIS_H] if if_changes == MIRROR_H else [])},
         "value_meters": target_in * IN,
         "scope": "overall",
     })
@@ -77,7 +78,7 @@ async def _resize(rules_dir, if_changes, target_in, dims=None):
             instruction=f"resize to {target_in}",
             dimensions=[DimensionIn(name=n, value_meters=v)
                         for n, v in (dims or DIMS).items()],
-            dim_axis_labels=AXIS,
+            dim_axis_labels=axis or AXIS,
             master_width_dim=MIRROR_W, master_height_dim=MIRROR_H,
             model_path=str(rules_dir / "AmberTest.SLDASM"),
         ))
@@ -342,3 +343,64 @@ async def test_model_without_a_hanger_is_unaffected(rules_dir):
     assert res.error is None
     assert res.hanger is None
     assert {c.name for c in res.changes} == {MIRROR_H, CHASSIS_H}
+
+
+# ── the chassis cap must not switch off when the RULES cannot supply the width ──
+#
+# Live 2026-08-25 (CLARA 16x36 -> 60x36). A rename left the chassis width dep naming a
+# component id that no longer existed, so `width_deps` yielded nothing and `chassis_w_in`
+# arrived as 0 — which meant "no cap" rather than "unknown". A 20" #1038 was selected for a
+# 10" chassis, the tab follower wrote 15.75" into it, and HANGING TAB LOCATIONS failed the
+# rebuild. The width was in the live dim dump the whole time; only the rules had lost it.
+
+CHASSIS_W = "D1@Sketch1 [12204-CHASSIS-2]"   # the real chassis WIDTH, 10" — narrow, like CLARA
+
+
+@pytest.mark.asyncio
+async def test_chassis_width_is_recovered_from_LIVE_dims_when_the_rules_lack_it(rules_dir):
+    dims = dict(DIMS, **{CHASSIS_W: 10 * IN})
+    axis = dict(AXIS, **{CHASSIS_W: "W"})
+    # The rules name no chassis width — exactly the state the rename left behind.
+    res = await _resize(rules_dir, MIRROR_H, 36, dims=dims, axis=axis, also=[])
+
+    assert res.error is None
+    # The fitted 20" hanger is WIDER than the 10" chassis it bolts to, so it cannot be kept.
+    assert res.hanger.keep_fitted is False
+    assert res.hanger.part != "1038"
+    chosen = res.hanger.target_width_meters / IN
+    assert chosen <= 10 + 1e-9, f"hanger {chosen}\" overhangs a 10\" chassis"
+
+
+@pytest.mark.asyncio
+async def test_the_TAB_SPACING_is_never_mistaken_for_the_chassis_width(rules_dir):
+    """The trap the fallback has to dodge, and the reason it is not a bare max().
+
+    The chassis carries its hanging-tab dims on the W axis too. AMBER 36x36 has NO chassis
+    width dim at all — only TAB_SPACING at 15.75" — so a bare "largest [W] chassis dim" reads
+    15.75" and rejects the 20" #1038 the client actually built. The tabs are cut INTO the
+    chassis; their spacing is never its width.
+    """
+    res = await _resize(rules_dir, MIRROR_H, 36, also=[])
+
+    assert res.error is None
+    assert res.hanger.keep_fitted is True, "the 20\" hanger was capped against its own tabs"
+
+
+# ── a dim the model does not have must never reach the app ───────────────────
+
+@pytest.mark.asyncio
+async def test_a_rule_naming_a_MISSING_dim_is_dropped_not_shipped(rules_dir):
+    """`selection.warning` promised these were "left unchanged" — nothing enforced it.
+
+    The change list carried them to the app, whose resolver dropped the unmatched
+    `[ComponentId]` and wrote the value to whatever bare dim name matched instead. Live
+    2026-08-25: 60" bound for the mirror landed on a 1" dim of the top-level assembly.
+    """
+    ghost = "D1@Sketch1 [12393-CHASSIS-RENAMED-AWAY-2]"
+    res = await _resize(rules_dir, MIRROR_H, 48, also=[CHASSIS_H, ghost])
+
+    assert res.error is None
+    names = {c.name for c in res.changes}
+    assert ghost not in names
+    assert CHASSIS_H in names, "the real dep must still be applied"
+
