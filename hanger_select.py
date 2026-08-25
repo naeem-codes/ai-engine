@@ -383,13 +383,25 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w, chassis_cap)
         new_h = (RESIZE_TARGET_FRACTION * glass_area) / new_w if new_w > 0 else 0.0
 
-        # Three ceilings on the height, all one-directional — the width is never reduced to
-        # satisfy them, because the span is the whole point.
-        #   * the glass, and MAX_HEIGHT_FRACTION of it (a hanger must not run off the bottom)
-        #   * the WIDTH itself: a hanger must never come back taller than it is wide. On a tall
-        #     narrow glass (24x60) the area target alone would give 15.6w x 20.8h — precisely
-        #     the landscape-to-portrait flip that made JEN's overflow.
-        cap = min(max_h, height_cap, new_w)
+        # Two ceilings on the height, both one-directional — the width is never reduced to
+        # satisfy them, because the span is the whole point:
+        # the glass, and MAX_HEIGHT_FRACTION of it (a hanger must not run off the bottom).
+        #
+        # There used to be a THIRD — `new_w`, i.e. never taller than wide. It is gone, and this
+        # is why. It was a proxy for two things that already have their own rules: running off
+        # the glass is MAX_HEIGHT_FRACTION, and failing to span is MIN_WIDTH_FRACTION. What it
+        # added on top was a shape preference the client's own catalogue contradicts — #1333 is
+        # 14.25x24, taller than wide, and the selector will pick it.
+        #
+        # Worse, it only ever fired AFTER the chassis had already pinned the width, so it turned
+        # a clipped hanger into a collapsed one. Live 20x80 with a 14in chassis: the flow wanted
+        # 13 x 27.75 — 22.6% of the glass, spanning 65% of the width at 35% of the height, every
+        # real gate passed — and the clamp forced 13 x 13, which is 10.6% and far below the 18%
+        # floor a PREFAB would have been rejected for. It did the same to 24x60 (16.7%).
+        #
+        # Removing it fixes both and moves nothing else: on a landscape glass the height never
+        # approaches the width, so the clamp never fired there.
+        cap = min(max_h, height_cap)
         if new_h > cap:
             new_h = cap
 

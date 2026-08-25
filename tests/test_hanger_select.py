@@ -184,23 +184,67 @@ def test_resizes_the_fitted_hanger_when_no_prefab_qualifies():
     assert TARGET_AREA_FRACTION <= choice.fraction <= MAX_AREA_FRACTION
 
 
-def test_the_resized_hanger_never_becomes_tall_and_narrow():
-    """What stops a wide/short hanger flipping to tall/narrow, as JEN's did.
+def test_the_resized_hanger_never_runs_off_the_glass():
+    """What actually stops JEN's failure — the HEIGHT CAP, not a never-taller-than-wide rule.
 
-    The aspect is no longer preserved EXACTLY — the height cap may clamp it, which only ever
-    makes it wider-and-shorter — so the invariant is the direction, not the ratio.
+    SUPERSEDED EXPECTATION, recorded deliberately. This test used to assert
+    `target_width_in >= target_height_in`. That clamp has been removed: it was a proxy for two
+    concerns that already have their own rules (MAX_HEIGHT_FRACTION for running off the glass,
+    MIN_WIDTH_FRACTION for failing to span), and what it added on top was a shape preference
+    the client's own catalogue contradicts — #1333 is 14.25x24, taller than wide, and the
+    selector picks it.
+
+    It also only ever fired AFTER the chassis had pinned the width, so it turned a clipped
+    hanger into a collapsed one. See test_a_chassis_clipped_hanger_grows_taller_not_squarer.
     """
-    # The aspect is no longer carried over from the fitted part at all — width comes from the
-    # span and height from the area band — so the surviving invariant is the DIRECTION: never
-    # taller than wide. 24x60 is the case that would otherwise flip (15.6w would want 20.8h).
     for gw, gh, fw, fh in [(12, 12, 6, 3), (24, 60, 14.25, 15), (50, 41.5, 30, 15),
                            (90, 36, 40, 20), (36, 72, 20, 15)]:
         choice = select_hanger(gw, gh, fitted_w_in=fw, fitted_h_in=fh)
         if not choice.resize_fitted:
             continue
-        assert choice.target_width_in >= choice.target_height_in, (
-            f"{gw}x{gh} came back portrait "
-            f"({choice.target_width_in}x{choice.target_height_in}) — the JEN failure")
+        where = f"{gw}x{gh} -> {choice.target_width_in}x{choice.target_height_in}"
+        # the rule that genuinely prevented JEN: never run off the bottom of the mirror
+        assert choice.target_height_in <= MAX_HEIGHT_FRACTION * gh + 1e-9, where
+        # and it must still span
+        assert choice.target_width_in >= MIN_WIDTH_FRACTION * gw - 1e-9, where
+
+
+def test_a_chassis_clipped_hanger_grows_taller_not_squarer():
+    """Live 20x80 with a 14in chassis — the bug this removal fixes.
+
+    The width is pinned at 13in by the 65% share. The old `h <= w` clamp then pinned the height
+    to 13in as well, giving 10.56% of the glass — far below the 18% floor a PREFAB would have
+    been rejected for. Every gate that describes a real failure passes at 13 x 27.75: it spans
+    65% of the mirror (floor 55%), sits at 35% of the mirror height (cap 60%), and fits inside
+    the 14in chassis.
+    """
+    c = select_hanger(20, 80, fitted_w_in=18, fitted_h_in=72, chassis_w_in=14)
+    assert c.resize_fitted is True
+    assert c.target_width_in == pytest.approx(13.0)
+    assert c.target_height_in == pytest.approx(27.75)
+    frac = (c.target_width_in * c.target_height_in) / (20 * 80)
+    assert MIN_ACCEPTABLE_FRACTION <= frac <= MAX_AREA_FRACTION, frac
+    assert c.target_height_in <= MAX_HEIGHT_FRACTION * 80
+    assert c.target_width_in >= MIN_WIDTH_FRACTION * 20
+
+
+def test_a_tall_glass_no_longer_squares_off_below_the_band():
+    """The other casualty. On a 24x60 with no prefab available the clamp squared the hanger to
+    15.5 x 15.5 = 16.68%, under the 18% floor, and nothing re-checked — it just shipped."""
+    w = 0.65 * 24
+    h = min(0.225 * 24 * 60 / w, 60, MAX_HEIGHT_FRACTION * 60)
+    assert (w * h) / (24 * 60) >= MIN_ACCEPTABLE_FRACTION - 1e-9
+    assert h > w, "this is exactly the case the clamp used to collapse"
+
+
+def test_removing_the_clamp_moves_nothing_on_a_landscape_mirror():
+    """The clamp only ever fired when the height approached the width, which on a landscape
+    glass it never does. These are the validated answers and they must not have shifted."""
+    for gw, gh, ew, eh in [(90, 36, 58.5, 12.5), (48, 36, 31.25, 12.5), (72, 40, 46.75, 13.75)]:
+        c = select_hanger(gw, gh, fitted_w_in=20, fitted_h_in=15)
+        assert c.resize_fitted is True, (gw, gh)
+        assert c.target_width_in == pytest.approx(ew), (gw, gh)
+        assert c.target_height_in == pytest.approx(eh), (gw, gh)
 
 
 def test_the_resized_hanger_lands_inside_the_band():
