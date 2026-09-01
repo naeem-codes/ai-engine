@@ -425,7 +425,12 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         seen.add(mate.dim)
 
         base = current.get(mate.dim, mate.value_meters)
-        new_val = base + shift
+        # SIGNED. `shift` is how far the edge moved; `direction` is how this particular mate has
+        # to change for its component to follow it. Adding the shift raw is right only for a mate
+        # measured straight off the assembly centre plane -- which was every mate the app could
+        # classify at the time, and none of the ones it could not. Getting it backwards drives the
+        # part TWICE the wrong way, so this is not a refinement.
+        new_val = base + shift * mate.direction
 
         # A clip lines up with the hanging tabs when those moved — same load path, and it
         # replaces the edge offset rather than adjusting it.
@@ -475,7 +480,13 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
         return 0.0
     master_new = applied.get(master, current.get(master, 0.0))
 
-    proportional = master_new / 6.0 if master_new > 0 else 0.0
+    # `master / 6` is a CLIP number: it was read off the client's own narrow products, and what
+    # it protects against is a MIRRORED PAIR meeting at the centreline. Applied to anything else
+    # it is just an invented lower bound -- on a 56" mirror it would shove any positioned part to
+    # at least 9.33" off centre, which for a single top-mounted part like the hanging bracket is
+    # simply wrong. The geometric no-overlap bound below is real regardless, so it always applies.
+    is_clip = policy.is_clip(mate.component, req.component_types)
+    proportional = master_new / 6.0 if (is_clip and master_new > 0) else 0.0
     no_overlap = mate.extent_meters / 2.0 + 0.25 * 0.0254 if mate.extent_meters > 0 else 0.0
     return max(proportional, no_overlap)
 

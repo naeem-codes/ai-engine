@@ -20,6 +20,13 @@ class MatePositionIn(BaseModel):
     component: str
     axis: str                     # "W", "H" or "D"
     extent_meters: float = 0.0    # the component's own size on that axis
+    # What to multiply the master's half-delta by. Measured by the app, which nudges the mate and
+    # watches which way the component actually goes, so it carries BOTH the side of the glass the
+    # component sits on and how hard the mate drives it (a mate that moves its part at half rate
+    # needs twice the change). A plain distance-from-the-centre-plane mate measures +1 on either
+    # side of the glass, which is what this code assumed before it was measured -- so the default
+    # keeps an older app, which sends no direction at all, behaving exactly as it used to.
+    direction: float = 1.0
 
 
 class SlotRowIn(BaseModel):
