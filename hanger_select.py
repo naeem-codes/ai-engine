@@ -135,6 +135,34 @@ MIN_ACCEPTABLE_FRACTION = TARGET_AREA_FRACTION - ACCEPT_BELOW_TARGET_MARGIN   # 
 # Raise it once they say how much chassis must remain outboard of the hanger.
 CHASSIS_CLEARANCE_IN = 0.0
 
+# ── Obstacle clearance: chassis width the hanger must NOT take ────────────────────────────
+# The chassis cap above stops the hanger overhanging the part carrying its tabs. It does not
+# stop the hanger reaching a component mounted ON that chassis.
+#
+# Live 2026-08-27, ISABELL 44x56: the chassis is 42.750" and #1215 (40x12) was chosen — 19.5% of
+# the AREA, so it passed every rule there was. ISABELL's hanging bracket follows the hanger
+# width, so it grew to 39.125" and left 1.81" per side, straight into `12296-LED-BRACKET`.
+#
+# 2.50" per side clears that with margin and is PROVISIONAL: the right number is the obstacle's
+# own footprint, which needs the app to send component bounding boxes. Until then this is a
+# reserved band, not a measurement — see `resize_policy.is_led_bracket` for the same caveat.
+# Applied ONLY to assemblies that actually contain the obstacle, so every other product keeps
+# the 0.0 clearance and nothing else moves.
+OBSTACLE_CLEARANCE_IN = 2.50
+
+# ── The other shape of the tab relationship: a HANGING BRACKET ────────────────────────────
+# Not every product carries its tabs on the chassis. ISABELL has none — a separate cross-member
+# seats inside the hanger's slots, and it is the WHOLE PART's width that tracks the hanger.
+# It is identified by COMPONENT ID (`resize_policy.is_hanging_bracket`), not by sketch number.
+#
+# The offset is CARRIED FORWARD from the live model, never re-asserted the way the 4.25" tab
+# inset is. That inset earned canonical treatment by being confirmed on four client products;
+# this relationship has been seen on one (a 13.375" bracket inside a 14.250" hanger, so 0.875").
+#
+# Sanity bound on the carried offset: the bracket seats INSIDE the hanger, so the gap is small
+# and positive. Anything wider means the match found a part that is not the bracket.
+MAX_BRACKET_INSET_IN = 6.0
+
 RESIZE_ROUND_TO_IN = 0.25
 
 # Where to aim when no prefab qualifies and the fitted hanger has to be resized: the middle
@@ -271,7 +299,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                   fit_margin_in: float = FIT_MARGIN_IN,
                   fitted_w_in: float = 0.0,
                   fitted_h_in: float = 0.0,
-                  chassis_w_in: float = 0.0) -> HangerChoice:
+                  chassis_w_in: float = 0.0,
+                  obstacle_clear_in: float = 0.0) -> HangerChoice:
     """Choose a hanger for a glass panel of `glass_w_in` x `glass_h_in` inches.
 
     `fitted_w_in`/`fitted_h_in` describe the hanger ALREADY in the model. Supplying them
@@ -296,7 +325,12 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
 
     width_floor = MIN_WIDTH_FRACTION * glass_w_in
     # 0 means "not supplied" -- never let a missing value silently reject every hanger.
-    chassis_cap = (chassis_w_in - CHASSIS_CLEARANCE_IN) if chassis_w_in > 0 else float("inf")
+    # The obstacle band comes off BOTH ends, so it costs twice its per-side value. Folding it
+    # into `chassis_cap` rather than adding a separate cap is deliberate: every outcome — kept,
+    # substituted, custom — already honours this one number, so the clearance reaches all three
+    # without touching any of them.
+    chassis_cap = ((chassis_w_in - CHASSIS_CLEARANCE_IN - 2 * max(obstacle_clear_in, 0.0))
+                   if chassis_w_in > 0 else float("inf"))
 
     candidates: list[Candidate] = []
     for part, w, h in PREFAB_HANGERS:

@@ -50,6 +50,20 @@ FIXED_SIZE: list[tuple[str, tuple[str, ...], str]] = [
      "LED power supply is fixed-size hardware — repositioned by its chassis mates, never resized"),
     ("clip", ("CLIP",),
      "LED/mirror clip is fixed-size hardware — repositioned by its chassis + mirror mates, never resized"),
+    # ISABELL has no chassis hanging TABS. The part that seats in the hanger's slots is a
+    # separate cross-member, `1047-HANGING-BRACKET`, and its width is a MATING dimension against
+    # the hanger — not a span across the mirror. Live 2026-08-27: it was named as a width
+    # dependent of the mirror, grew +10.000" with the glass while the hanger grew only +5.750"
+    # (a #1119 -> #1038 swap), and finished 23.375" WIDER than the 20.000" hanger it seats inside.
+    # It was 13.375" against a 14.250" hanger before the resize.
+    #
+    # So it stays fixed-size — no rule may drive it off the mirror — and the HANGER FOLLOWER
+    # writes it instead, the same split the hanger itself uses. This entry must sit AFTER the
+    # clip entry: `2004-HANGING-BRACKET-CLIP-1/2` also contain "HANGING BRACKET" and are real
+    # fixed hardware, and the first-match loop hands them to "clip" before reaching here.
+    ("hanging bracket", ("HANGING BRACKET",),
+     "Hanging bracket seats inside the hanger's slots — its width follows the HANGER, not the "
+     "mirror, and is written by the hanger follower rather than by a resize rule"),
     ("bracket", ("BRACKET",),
      "LED bracket is fixed-size hardware — repositioned by its mates, never resized"),
     # The hanger is chosen from a PREFAB LEGEND of distinct part numbers (#1004 14.25x10,
@@ -292,6 +306,38 @@ def is_hanger(dim_name: str,
     exact catalogue dims. `interpret._hanger_changes` uses this to find the dims to write.
     """
     return _is_kind(dim_name, "HANGER", ("HANGER",), types)
+
+
+def is_hanging_bracket(name: str, types: dict[str, str] | None = None) -> bool:
+    """True for the cross-member that seats inside the hanger's slots (ISABELL's
+    `1047-HANGING-BRACKET`) — and NOT for the clips that carry the same words in their number.
+
+    Accepts either a dim name or a bare component id, like `is_clip`.
+
+    The part stays FIXED_SIZE and this never unfreezes it. It exists so the HANGER FOLLOWER can
+    identify the one part whose width has to track the hanger, the way the chassis tab spacing
+    does on products that have tabs. Patterns come from the FIXED_SIZE entry itself, so there is
+    one definition of what a hanging bracket is.
+    """
+    if is_clip(name, types):
+        return False
+    patterns = next((p for k, p, _r in FIXED_SIZE if k == "hanging bracket"), ())
+    return any(p in _norm(component_of(name) or name) for p in patterns)
+
+
+def is_led_bracket(name: str, types: dict[str, str] | None = None) -> bool:
+    """True for an LED bracket — fixed hardware the hanger has to make room for.
+
+    ⚠️ NARROW BY REQUEST. The generic form is "any component already in FIXED_SIZE is something
+    the hanger must clear", which needs no part name at all. That needs the app to send component
+    bounding boxes so the clearance can be MEASURED; until then the obstacle is the one part we
+    know collides, named explicitly rather than guessed at.
+
+    Excludes the HANGING bracket, which is the part being positioned, not an obstacle to it.
+    """
+    if is_hanging_bracket(name, types) or is_clip(name, types):
+        return False
+    return "LED BRACKET" in _norm(component_of(name) or name)
 
 
 def is_clip(name: str, types: dict[str, str] | None = None) -> bool:

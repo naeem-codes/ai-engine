@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import rules
+from hanger_select import OBSTACLE_CLEARANCE_IN, select_hanger
 from interpret import interpret
 from models import DimensionIn, InterpretRequest
 
@@ -404,3 +405,144 @@ async def test_a_rule_naming_a_MISSING_dim_is_dropped_not_shipped(rules_dir):
     assert ghost not in names
     assert CHASSIS_H in names, "the real dep must still be applied"
 
+
+
+# ── LED bracket collision: the hanger is capped so the hanging bracket clears it ──
+#
+# Live 2026-08-27, ISABELL 44x56. The chassis is 42.750" and #1215 (40x12) was chosen — 19.5% of
+# the AREA, so it passed every rule there was. The hanging bracket follows the hanger's width, so
+# it grew to 39.125" and left 1.81" per side, straight into `12296-LED-BRACKET`.
+#
+# The chain the fix relies on: cap the HANGER -> the bracket follows the hanger -> the bracket
+# never reaches the LED brackets. Both halves are needed; capping alone does nothing if the
+# bracket is driven off the mirror instead.
+
+ISA_MIRROR_W = "D1@Sketch1 [1046-MIRROR-KAREN-1]"
+ISA_MIRROR_H = "D2@Sketch1 [1046-MIRROR-KAREN-1]"
+ISA_CHASSIS_W = "D1@Sketch2 [12295-CHASSIS-1]"
+ISA_HANGER_W = "D2@Base-Flange1 [1119-HANGER-1]"
+ISA_HANGER_H = "D1@Sketch1 [1119-HANGER-1]"
+ISA_BRACKET_W = "D2@Base-Flange1 [1047-HANGING-BRACKET-1]"
+ISA_LED_L = "D7@Edge-Flange1 [12296-LED-BRACKET-1]"
+ISA_LED_R = "D7@Edge-Flange1 [12296-LED-BRACKET-2]"
+ISA_CLIP = "D2@Base-Flange1 [2004-HANGING-BRACKET-CLIP-1]"
+
+ISA_AXIS = {ISA_MIRROR_W: "W", ISA_MIRROR_H: "H", ISA_CHASSIS_W: "W", ISA_HANGER_W: "W",
+            ISA_HANGER_H: "H", ISA_BRACKET_W: "W", ISA_LED_L: "W", ISA_LED_R: "W", ISA_CLIP: "W"}
+
+
+def _isa_dims(mw, mh, cw, hw, bw, with_led=True):
+    d = {ISA_MIRROR_W: mw * IN, ISA_MIRROR_H: mh * IN, ISA_CHASSIS_W: cw * IN,
+         ISA_HANGER_W: hw * IN, ISA_HANGER_H: 15 * IN, ISA_BRACKET_W: bw * IN,
+         ISA_CLIP: 1.5 * IN}
+    if with_led:
+        d[ISA_LED_L] = 2 * IN
+        d[ISA_LED_R] = 2 * IN
+    return d
+
+
+@pytest.fixture
+def isabell_rules(tmp_path, monkeypatch):
+    """The rule set as the generator really wrote it — bracket listed as a width dependent."""
+    doc = {"model": "IsabellTest",
+           "width": [{"if_changes": ISA_MIRROR_W, "also_change": [ISA_CHASSIS_W, ISA_BRACKET_W]}],
+           "height": [{"if_changes": ISA_MIRROR_H, "also_change": []}],
+           "component_labels": {"1047-HANGING-BRACKET-1": "Hanging Bracket"}}
+    d = tmp_path / "rules"
+    d.mkdir()
+    (d / "IsabellTest.rules.json").write_text(json.dumps(doc))
+    monkeypatch.setattr(rules, "RULES_DIR", d)
+    return tmp_path
+
+
+async def _isa_resize(rules_dir, dims, target_in):
+    llm = json.dumps({
+        "rule": {"if_changes": ISA_MIRROR_W, "also_change": [ISA_CHASSIS_W, ISA_BRACKET_W]},
+        "value_meters": target_in * IN, "scope": "overall"})
+    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+        return await interpret(InterpretRequest(
+            instruction=f"resize to {target_in}",
+            dimensions=[DimensionIn(name=n, value_meters=v) for n, v in dims.items()],
+            dim_axis_labels=ISA_AXIS, master_width_dim=ISA_MIRROR_W,
+            master_height_dim=ISA_MIRROR_H,
+            model_path=str(rules_dir / "IsabellTest.SLDASM")))
+
+
+def test_the_offending_prefab_is_rejected_by_the_clearance():
+    """#1215 at 40in leaves 1.81in of chassis per side once the bracket follows it."""
+    without = select_hanger(44, 56, fitted_w_in=20, fitted_h_in=15, chassis_w_in=42.75)
+    assert without.part == "1215", "precondition: this is what was chosen live"
+    assert (42.75 - (without.target_width_in - 0.875)) / 2 < 2.0
+
+    with_clear = select_hanger(44, 56, fitted_w_in=20, fitted_h_in=15, chassis_w_in=42.75,
+                               obstacle_clear_in=OBSTACLE_CLEARANCE_IN)
+    assert with_clear.part != "1215"
+    assert (42.75 - (with_clear.target_width_in - 0.875)) / 2 >= OBSTACLE_CLEARANCE_IN
+
+
+def test_the_clearance_binds_every_outcome_not_just_prefabs():
+    """It is folded into `chassis_cap`, so kept / substituted / custom all honour one number."""
+    for fw, fh in [(20, 15), (41, 12), (14.25, 15)]:
+        c = select_hanger(44, 56, fitted_w_in=fw, fitted_h_in=fh, chassis_w_in=42.75,
+                          obstacle_clear_in=OBSTACLE_CLEARANCE_IN)
+        assert c.target_width_in <= 42.75 - 2 * OBSTACLE_CLEARANCE_IN + 1e-9, (fw, fh, c.reason)
+
+
+def test_a_product_with_no_LED_bracket_is_completely_unaffected():
+    """The narrow half of the fix: clearance is 0 unless the obstacle is really there."""
+    a = select_hanger(44, 56, fitted_w_in=20, fitted_h_in=15, chassis_w_in=42.75)
+    b = select_hanger(44, 56, fitted_w_in=20, fitted_h_in=15, chassis_w_in=42.75,
+                      obstacle_clear_in=0.0)
+    assert (a.part, a.target_width_in, a.target_height_in) == \
+           (b.part, b.target_width_in, b.target_height_in)
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_the_bracket_clears_the_led_brackets(isabell_rules):
+    """The whole chain, on the live numbers."""
+    dims = _isa_dims(34, 46, 32.75, 20.0, 19.125)
+    res = await _isa_resize(isabell_rules, dims, 44)
+    by = {c.name: c.value_meters for c in res.changes}
+    bracket = by[ISA_BRACKET_W] / IN
+    chassis = by[ISA_CHASSIS_W] / IN
+    assert res.hanger.part != "1215"
+    assert bracket == pytest.approx(res.hanger.target_width_meters / IN - 0.875, abs=1e-6)
+    assert (chassis - bracket) / 2 >= OBSTACLE_CLEARANCE_IN - 1e-9
+
+
+@pytest.mark.asyncio
+async def test_without_the_follower_the_cap_would_be_pointless(isabell_rules):
+    """The bracket must take the HANGER's delta, not the mirror's — mirror +10.000in vs hanger
+    +5.750in is how it ended up wider than the part it seats inside."""
+    dims = _isa_dims(24, 36, 22.75, 14.25, 13.375)
+    res = await _isa_resize(isabell_rules, dims, 34)
+    bracket = next(c.value_meters for c in res.changes if c.name == ISA_BRACKET_W) / IN
+    hanger = res.hanger.target_width_meters / IN
+    assert bracket == pytest.approx(hanger - 0.875, abs=1e-6)
+    assert bracket != pytest.approx(13.375 + 10.0), "that is the mirror-driven value — the bug"
+
+
+@pytest.mark.asyncio
+async def test_the_mirror_rule_can_no_longer_drive_the_bracket(isabell_rules):
+    """The rule still names it — rule files are regenerated, not hand-edited — so the POLICY is
+    what has to refuse it, or the follower's value gets overwritten."""
+    dims = _isa_dims(24, 36, 22.75, 14.25, 13.375)
+    res = await _isa_resize(isabell_rules, dims, 34)
+    written = [c.value_meters / IN for c in res.changes if c.name == ISA_BRACKET_W]
+    assert len(written) == 1, f"expected exactly one write, got {written}"
+
+
+@pytest.mark.asyncio
+async def test_the_clips_are_never_written(isabell_rules):
+    """They share "HANGING BRACKET" in their part number and are real fixed hardware."""
+    res = await _isa_resize(isabell_rules, _isa_dims(24, 36, 22.75, 14.25, 13.375), 34)
+    assert ISA_CLIP not in {c.name for c in res.changes}
+
+
+@pytest.mark.asyncio
+async def test_a_bracket_already_wider_than_its_hanger_is_flagged_not_followed(isabell_rules):
+    """The sanity bound — a bracket that does not sit inside the hanger is either not the
+    bracket, or a model already broken by the old behaviour."""
+    dims = _isa_dims(34, 46, 32.75, 20.0, 23.375)      # the value the old bug produced
+    res = await _isa_resize(isabell_rules, dims, 44)
+    assert ISA_BRACKET_W not in {c.name for c in res.changes}

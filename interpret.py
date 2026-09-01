@@ -179,10 +179,21 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         else:
             log("  [HANGER] no chassis width anywhere - hanger not capped against it")
 
+    # An LED bracket is mounted ON the chassis, so the hanger cannot use the full chassis width
+    # even though the chassis cap says it may. Reserve a band at each end for it — but only on
+    # assemblies that actually carry one, so every other product keeps today's behaviour exactly.
+    obstacle_clear_in = 0.0
+    if any(policy.is_led_bracket(d.name, req.component_types) for d in req.dimensions):
+        obstacle_clear_in = hanger_select.OBSTACLE_CLEARANCE_IN
+        log(f"  [HANGER] LED bracket present — reserving {obstacle_clear_in:.2f}\" of chassis at "
+            f"each end, so the hanger is capped at "
+            f"{chassis_w / 0.0254 - 2 * obstacle_clear_in:.3f}\" not {chassis_w / 0.0254:.3f}\"")
+
     choice = select_hanger_meters(glass_w, glass_h,
                                   fitted_w_in=fitted_w / 0.0254,
                                   fitted_h_in=fitted_h / 0.0254,
-                                  chassis_w_in=chassis_w / 0.0254)
+                                  chassis_w_in=chassis_w / 0.0254,
+                                  obstacle_clear_in=obstacle_clear_in)
     for line in choice.log_lines():
         log("  " + line)
 
@@ -229,6 +240,17 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
             log(f"  [HANGER] follower {dim}: {current[dim] / 0.0254:.3f}\" → "
                 f"{new_val / 0.0254:.3f}\" (holds the "
                 f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" inset from the hanger width)")
+
+        # Products with no chassis tabs carry a hanging BRACKET instead. Same relationship,
+        # different part — and deliberately NOT added to `sel.follower_dims`, which feeds the
+        # clip alignment that reads a tab SPACING. A bracket width is not a spacing.
+        for dim, new_val, inset_in in _hanger_bracket_follower_updates(req, old_w, new_w - old_w):
+            if abs(new_val - current.get(dim, 0.0)) < 1e-9:
+                continue              # already correct — nothing to write
+            out.append(DimensionChange(name=dim, value_meters=new_val))
+            log(f"  [HANGER] bracket {dim}: {current[dim] / 0.0254:.3f}\" → "
+                f"{new_val / 0.0254:.3f}\" (keeps its {inset_in:.3f}\" seat inside the "
+                f"{new_w / 0.0254:.3f}\" hanger)")
         return out, sel
 
     if choice.keep_fitted:
@@ -578,6 +600,55 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
         if drift_in > 0.005:
             log(f"  [HANGER] follower {d.name} inset CORRECTED from {inset_in:.3f}\" to "
                 f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" (was drifted by {drift_in:.3f}\")")
+        updates.append((d.name, new_val, inset_in))
+    return updates
+
+
+def _hanger_bracket_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
+                                     ) -> list[tuple[str, float, float]]:
+    """A HANGING BRACKET's width, shifted by the hanger's width delta.
+
+    Yields (dim_name, new_value_meters, current_inset_inches).
+
+    The tab follower above covers products whose tabs are cut into the chassis. ISABELL has no
+    tabs: a separate cross-member seats inside the hanger's slots, and it is the WHOLE part's
+    width that has to track the hanger.
+
+    Live 2026-08-27, resizing 24x36 -> 34x46: the bracket was named as a width dependent of the
+    MIRROR, so it grew +10.000" while the hanger grew only +5.750" (a #1119 -> #1038 swap). It
+    finished 23.375" wide against a 20.000" hanger — WIDER than the part it has to seat inside,
+    having started 13.375" inside a 14.250" one. Following the hanger instead gives 19.125".
+
+    Unlike the tab inset this CARRIES THE LIVE OFFSET FORWARD rather than re-asserting a
+    canonical one: 4.25" is confirmed across four client products, this relationship on one.
+
+    This is also what makes the obstacle clearance work at all — capping the hanger only keeps
+    the bracket away from the LED brackets because the bracket tracks the hanger.
+    """
+    updates: list[tuple[str, float, float]] = []
+    seen: set[str] = set()
+    for d in req.dimensions:
+        if not policy.is_hanging_bracket(d.name, req.component_types):
+            continue
+        if (req.dim_axis_labels or {}).get(d.name) != "W":
+            continue                      # only the dim that spans the hanger
+        if d.name in seen:
+            continue                      # the dim dump lists every dim twice
+        seen.add(d.name)
+
+        inset_in = (old_hanger_w - d.value_meters) / 0.0254
+        if not (-1e-9 <= inset_in <= hanger_select.MAX_BRACKET_INSET_IN):
+            log(f"  [HANGER] bracket candidate {d.name} SKIPPED — sits {inset_in:.3f}\" from "
+                f"the hanger width, outside the 0-{hanger_select.MAX_BRACKET_INSET_IN:.2f}\" a "
+                f"part seating INSIDE the hanger can have. Either it is not the hanging "
+                f"bracket, or this model's bracket is already misaligned — check it in "
+                f"SolidWorks")
+            continue
+
+        new_val = d.value_meters + delta
+        if new_val <= 0:
+            log(f"  [HANGER] bracket {d.name} SKIPPED — would go to {new_val * 1000:.2f} mm")
+            continue
         updates.append((d.name, new_val, inset_in))
     return updates
 
