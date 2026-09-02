@@ -1,6 +1,8 @@
 import json
+import hanger_select
 import resize_policy as policy
-from models import GenerateRulesRequest, GenerateRulesResponse, RulePair, SkipEntry
+from models import (GenerateRulesRequest, GenerateRulesResponse, OffsetRule, RulePair,
+                    SkipEntry)
 from llm import call_llm
 from prompts import rules_system_prompt
 from log import log, section
@@ -14,6 +16,104 @@ def _strip_fences(text: str) -> str:
     if text.endswith("```"):
         text = text[: text.rfind("```")].strip()
     return text.strip()
+
+
+def _hanger_width_dim(req: GenerateRulesRequest) -> tuple[str, float]:
+    """The hanger's outer WIDTH driver and its value, or ("", 0.0).
+
+    Largest [W] dim on a hanger, excluding `@Sheet-Metal` dims -- those are flat-pattern / bend
+    metadata, not an outer size (on AMY the largest [H] hanger dim was a Sheet-Metal one at
+    446.70 mm, against a real 431.80 mm driver). Same rule `interpret._hanger_changes` uses.
+    """
+    labels = req.dim_axis_labels or {}
+    cands = [(d.value_meters, d.name) for d in req.dimensions
+             if labels.get(d.name) == "W"
+             and policy.is_hanger(d.name, None, None)
+             and "@SHEET-METAL" not in d.name.upper()]
+    if not cands:
+        return "", 0.0
+    value, name = max(cands)
+    return name, value
+
+
+def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> list[OffsetRule]:
+    """Derive the hanging-tab -> hanger-width link, ONCE, from the aligned model.
+
+    Why here rather than at resize time, where the follower has always done it: the search
+    "which chassis dim sits 4.25in inside the hanger?" only has a right answer while the model is
+    still correct. Rule generation runs on the product as the client authored it, so the
+    relationship is intact by definition. Resize N runs on a model that may already be drifted,
+    where the question is not merely unanswerable but answerable WRONGLY.
+
+    Not hypothetical. Live 2026-09-02, BREAM: a hanger swap left a stale component id in the
+    plan, the applier dropped both hanger width writes while the chassis tab write landed, and
+    the model was saved with its tabs set for a 15.5in hanger it never received. The inset was
+    then 0.750in, outside the +/-1.0in identification window, so the follower stopped recognising
+    the dim ENTIRELY -- a ratchet, because nothing remembered what the dim was. Three resizes
+    later the hanger was 78.000in and the tabs were still 11.250in apart.
+
+    A stored link cannot ratchet: the dim is named, not searched for. Drift can no longer hide
+    it, and becomes something a resize CORRECTS instead of something that silently switches the
+    follower off.
+
+    Returns at most one rule. Ambiguity records a `skip` entry and writes nothing, so the rules
+    UI shows why the link is absent instead of looking like the generator forgot it.
+    """
+    hanger_dim, hanger_w = _hanger_width_dim(req)
+    if hanger_w <= 0:
+        return []
+
+    dim_values = {d.name: d.value_meters for d in req.dimensions}
+    cands = hanger_select.find_tab_spacing_candidates(
+        dim_values, req.dim_axis_labels, hanger_w)
+
+    if not cands:
+        log(f"  [TAB] no chassis dim sits {hanger_select.EXPECTED_TAB_INSET_IN:.2f}"
+            f"+/-{hanger_select.GEN_TAB_INSET_TOL_IN:.2f}in inside the "
+            f"{hanger_w / 0.0254:.3f}in hanger -- this product has no tab spacing to link "
+            f"(a hanging-BRACKET product is expected to land here)")
+        return []
+
+    if len(cands) > 1:
+        detail = ", ".join(f"{c.dim} ({c.inset_in:.3f}in)" for c in cands)
+        log(f"  [TAB] AMBIGUOUS -- {len(cands)} dims sit the right distance inside the hanger "
+            f"and nothing separates them: {detail}. No link stored; the resize-time follower "
+            f"keeps its own name-gated search for this product.")
+        skip.append(SkipEntry(
+            name=cands[0].dim,
+            reason=(f"hanging-tab link NOT stored: {len(cands)} dims sit "
+                    f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}in inside the hanger and are "
+                    f"indistinguishable ({detail}). Confirm which is the tab spacing in "
+                    f"SolidWorks.")))
+        return []
+
+    best = cands[0]
+    # Snap a near-canonical inset so modelling noise is not baked into the product forever, but
+    # keep a genuinely different one: the link is per-product, so it is allowed to differ.
+    drift = abs(best.inset_in - hanger_select.EXPECTED_TAB_INSET_IN)
+    if drift <= hanger_select.GEN_TAB_SNAP_IN:
+        inset_in = hanger_select.EXPECTED_TAB_INSET_IN
+    else:
+        inset_in = best.inset_in
+        log(f"  [TAB] inset {inset_in:.3f}in differs from the canonical "
+            f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}in by {drift:.3f}in -- storing the "
+            f"MEASURED value, since this link is derived per product")
+
+    # offset is target - source, so the follower writes `new_hanger_width + offset`. Negative
+    # because the tabs sit INSIDE the hanger.
+    offset_m = -inset_in * 0.0254
+    log(f"  [TAB] linked {best.dim} -> {hanger_dim}: tabs {best.value_meters / 0.0254:.3f}in sit "
+        f"{inset_in:.3f}in inside the {hanger_w / 0.0254:.3f}in hanger"
+        + ("" if best.named else " (identified by relationship -- no name hint matched)"))
+    return [OffsetRule(
+        component=policy.component_of(best.dim),
+        target_dim=best.dim,
+        source_dim=hanger_dim,
+        offset_meters=offset_m,
+        note=(f"hanging-tab spacing seats in the hanger's slots, {inset_in:.3f}in inside its "
+              f"width. Derived from the aligned model ({best.value_meters / 0.0254:.3f}in tabs "
+              f"in a {hanger_w / 0.0254:.3f}in hanger) so no resize has to re-guess it."),
+    )]
 
 
 async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
@@ -191,5 +291,15 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     if not isinstance(part_label, str):
         part_label = ""
 
-    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  skip={len(skip)}  component_labels={len(component_labels)}  part_label={part_label or '(none)'}")
-    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, skip=skip, component_labels=component_labels, part_label=part_label)
+    # Derived, not authored: the hanging-tab link is a measured fact about this product, so it
+    # is worked out here rather than asked of the LLM or of the user. Wrapped, and done last, so
+    # a fault in a brand-new code path can never cost the caller its rules.
+    try:
+        offset_rules = _tab_spacing_offset(req, skip)
+    except Exception as exc:                              # noqa: BLE001 - never fatal
+        log(f"  [TAB] link derivation failed ({exc}) -- rules are unaffected and the "
+            f"resize-time follower keeps its own search")
+        offset_rules = []
+
+    log(f"  width_rules={len(width_rules)}  height_rules={len(height_rules)}  skip={len(skip)}  component_labels={len(component_labels)}  offset={len(offset_rules)}  part_label={part_label or '(none)'}")
+    return GenerateRulesResponse(width_rules=width_rules, height_rules=height_rules, skip=skip, component_labels=component_labels, part_label=part_label, offset=offset_rules)

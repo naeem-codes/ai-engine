@@ -79,6 +79,7 @@ def _dependent_value(current: float, master_current: float, master_new: float) -
 def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
                     component_labels: dict[str, str] | None,
                     width_deps: list[str] | None = None,
+                    model_rules=None,
                     ) -> tuple[list[DimensionChange], HangerSelection | None]:
     """Re-select the prefab hanger for the RESIZED glass and write its catalogue dims.
 
@@ -232,14 +233,15 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         # else from a dimension write, else unchanged.
         new_w = hanger_w if hanger_w else next(
             (c.value_meters for c in out if c.name == w_dim), old_w)
-        for dim, new_val, inset_in in _hanger_follower_updates(req, old_w, new_w - old_w):
+        for dim, new_val, _cur_inset, applied_in in _hanger_follower_updates(
+                req, old_w, new_w - old_w, model_rules):
             if abs(new_val - current.get(dim, 0.0)) < 1e-9:
                 continue              # already correct — nothing to write
             out.append(DimensionChange(name=dim, value_meters=new_val))
             sel.follower_dims.append(dim)
             log(f"  [HANGER] follower {dim}: {current[dim] / 0.0254:.3f}\" → "
-                f"{new_val / 0.0254:.3f}\" (holds the "
-                f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" inset from the hanger width)")
+                f"{new_val / 0.0254:.3f}\" (holds the {applied_in:.3f}\" inset from the "
+                f"hanger width)")
 
         # Products with no chassis tabs carry a hanging BRACKET instead. Same relationship,
         # different part — and deliberately NOT added to `sel.follower_dims`, which feeds the
@@ -561,15 +563,135 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
     return out
 
 
+def _instance_stem(component: str) -> str:
+    """`12204-CHASSIS-2` -> `12204-CHASSIS`. The instance suffix is the volatile part."""
+    head, sep, tail = component.rpartition("-")
+    return head.upper() if sep and tail.isdigit() else component.upper()
+
+
+def _resolve_stored_dim(stored: str, live: list[str],
+                        types: dict[str, str] | None) -> str | None:
+    """Find `stored` among the model's live dim names, tolerating a renamed component.
+
+    A rules file records `D1@Sketch81 [12204-CHASSIS-2]`, but the bracketed half is an INSTANCE
+    id and instance ids do not survive. A chassis rename changes the part number; a hanger swap
+    renumbers the instance. That staleness is what dropped BREAM's two hanger writes on
+    2026-09-02 ("no component matches that id"), so a stored link that only ever matched exactly
+    would inherit the very bug it exists to fix.
+
+    Three tiers, strongest first, and it gives up rather than guessing wide:
+      1. the exact name;
+      2. the same dim on the same PART (instance suffix ignored) -- survives re-instancing;
+      3. the same dim on any chassis -- survives a part renumber, which the app does routinely
+         (`[RENAME] resized: 12226-CHASSIS-2 ... Number='1003'`).
+    """
+    if stored in live:
+        return stored
+    head = stored.split(" [", 1)[0].strip().upper()
+    if not head:
+        return None
+
+    def parts(name):
+        h, sep, rest = name.partition(" [")
+        return h.strip().upper(), (rest[:-1] if rest.endswith("]") else rest)
+
+    want_comp = parts(stored)[1]
+    same_head = [n for n in live if parts(n)[0] == head]
+    if not same_head:
+        return None
+
+    same_part = [n for n in same_head
+                 if _instance_stem(parts(n)[1]) == _instance_stem(want_comp)]
+    if len(same_part) == 1:
+        log(f"  [TAB] stored link {stored} resolved to {same_part[0]} (re-instanced)")
+        return same_part[0]
+
+    on_chassis = [n for n in same_head if policy.is_chassis(n, types)]
+    if len(on_chassis) == 1:
+        log(f"  [TAB] stored link {stored} resolved to {on_chassis[0]} (component renamed)")
+        return on_chassis[0]
+
+    log(f"  [TAB] stored link {stored} matches no single live dim "
+        f"({len(same_head)} share its feature) — falling back to the geometric search")
+    return None
+
+
+def _stored_tab_link(req: InterpretRequest, model_rules) -> tuple[str, float] | None:
+    """The rules file's hanging-tab link as (live_dim_name, offset_meters), if it has one.
+
+    Only a link whose TARGET is a chassis dim and whose SOURCE is a hanger dim is taken -- a
+    user-authored offset between two unrelated dims must not be mistaken for the tab spacing,
+    and it is handled properly by `expand_offsets` anyway.
+
+    `expand_offsets` cannot serve this case, which is why the follower reads the link directly:
+    it only fires when the source dim is among the turn's changes, and on a prefab SWAP no hanger
+    dimension is written at all (the swapped-in file already carries the catalogue size). The
+    live hanger width is known here and nowhere else.
+    """
+    if model_rules is None:
+        return None
+    live = [d.name for d in req.dimensions]
+    for r in getattr(model_rules, "offset", []) or []:
+        if not r.target_dim or not r.source_dim:
+            continue
+        if not policy.is_chassis(r.target_dim, req.component_types):
+            continue
+        if not policy.is_hanger(r.source_dim, None, req.component_types):
+            continue
+        resolved = _resolve_stored_dim(r.target_dim, live, req.component_types)
+        if resolved:
+            return resolved, r.offset_meters
+    return None
+
+
 def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
-                             ) -> list[tuple[str, float, float]]:
+                             model_rules=None,
+                             ) -> list[tuple[str, float, float, float]]:
     """Chassis dims that track the hanger width, shifted by the hanger's width delta.
 
-    Yields (dim_name, new_value_meters, current_inset_inches). A candidate is skipped when
-    its offset from the hanger width is nowhere near the known 4.25" tab inset — that means
-    the name hint matched the wrong dim, and writing it would deform the chassis.
+    Yields (dim_name, new_value_meters, current_inset_inches, applied_inset_inches).
+
+    TWO PATHS, and which one runs matters more than what either does.
+
+    1. A STORED LINK, written once by `generate_rules._tab_spacing_offset` from the model as the
+       client authored it. The dim is NAMED, so nothing has to be recognised and drift cannot
+       hide it. This is the path that should run on every product generated from now on.
+
+    2. The legacy geometric search below, kept verbatim for rule sets written before the link
+       existed. It identifies the dim by "sits 4.25" +/-1.0" inside the current hanger width",
+       which is only answerable while the model is still aligned. Once it isn't, the dim stops
+       being recognised and the tabs freeze wherever they were -- see the BREAM note in
+       `generate_rules._tab_spacing_offset`. Regenerating a product's rules moves it to path 1
+       and retires this for that model.
+
+    The search is deliberately NOT widened to cover path 2's failures. Dropping its name gate
+    was tried and is worse than doing nothing: with the gate removed, a chassis whose real tab
+    dim has drifted OUT of the window can leave a decoy as the sole candidate, and the follower
+    then confidently writes to a dim it has never touched before. Measured on 12204 at a 24"
+    hanger: the real `D1@Sketch81` (15.750") falls outside, `D5@Sketch105` (20.000") is left
+    alone in the window. Doing nothing is the correct failure here; the fix is path 1.
     """
-    updates: list[tuple[str, float, float]] = []
+    updates: list[tuple[str, float, float, float]] = []
+
+    stored = _stored_tab_link(req, model_rules)
+    if stored is not None:
+        name, offset_m = stored
+        current = {d.name: d.value_meters for d in req.dimensions}.get(name, 0.0)
+        new_hanger_w = old_hanger_w + delta
+        new_val = new_hanger_w + offset_m
+        inset_in = -offset_m / 0.0254
+        if new_val <= 0:
+            log(f"  [TAB] stored link {name} SKIPPED — would go to {new_val * 1000:.2f} mm")
+            return []
+        # A stored link turns drift from something that DISABLES the follower into something it
+        # repairs: the correct value no longer depends on the current one being right.
+        was_in = (old_hanger_w - current) / 0.0254
+        if abs(was_in - inset_in) > 0.005:
+            log(f"  [TAB] {name} is {was_in:.3f}\" inside the {old_hanger_w / 0.0254:.3f}\" "
+                f"hanger but the stored link says {inset_in:.3f}\" — this model drifted, and "
+                f"this resize corrects it")
+        return [(name, new_val, was_in, inset_in)]
+
     seen: set[str] = set()
     for d in req.dimensions:
         upper = d.name.upper()
@@ -611,7 +733,7 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
         if drift_in > 0.005:
             log(f"  [HANGER] follower {d.name} inset CORRECTED from {inset_in:.3f}\" to "
                 f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" (was drifted by {drift_in:.3f}\")")
-        updates.append((d.name, new_val, inset_in))
+        updates.append((d.name, new_val, inset_in, hanger_select.EXPECTED_TAB_INSET_IN))
     return updates
 
 
@@ -1029,7 +1151,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         # The width rule's dependents include the chassis width dim, which caps the hanger.
         width_deps = [d for r in model_rules.width for d in r.also_change]
         hanger_changes, hanger = _hanger_changes(req, changes, model_rules.component_labels,
-                                                 width_deps)
+                                                 width_deps, model_rules)
         changes.extend(hanger_changes)
         explanation += _hanger_note(hanger)
 

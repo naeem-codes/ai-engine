@@ -32,6 +32,8 @@ the AMBER hanger's bounding box is 20.000" wide x 15.000" tall, matching legend 
 
 from dataclasses import dataclass, field
 
+import resize_policy as policy
+
 # The HANGER LEGEND sheet. (part number, width_in, height_in) — see
 # memory reference_hanger_prefab_legend for the source photo.
 PREFAB_HANGERS: list[tuple[str, float, float]] = [
@@ -63,6 +65,98 @@ PREFAB_HANGERS: list[tuple[str, float, float]] = [
 HANGER_FOLLOWER_HINTS: tuple[str, ...] = ("SKETCH81",)
 EXPECTED_TAB_INSET_IN = 4.25    # cross-checked; a match this far off the hanger width is
 EXPECTED_TAB_INSET_TOL_IN = 1.0  # almost certainly the wrong dim, so skip it and log.
+
+# ── Identifying the tab spacing ONCE, at rule-generation time ─────────────────────────────
+#
+# The 1.0" window above is a RESIZE-time tolerance and has to be that wide: the follower may be
+# looking at a model whose tabs have already drifted, and a window narrower than the drift would
+# stop recognising the dim at all.
+#
+# It is only affordable because the resize-time search is ALSO gated on the sketch name, which
+# does the real discriminating. Rule generation has no such gate — it searches every chassis dim,
+# so the window has to discriminate on its own, and measured against the real products 1.0"
+# cannot: PIAZZA's chassis holds two dims inside it against a 14.25" hanger (10.000" and
+# 10.813"), and 9535's holds four.
+#
+# Generation can afford to be strict, because it runs on the model as the client AUTHORED it,
+# where the relationship is intact by definition — that is the entire reason for identifying here
+# rather than on every resize. The four confirmed products sit at 4.250, 4.250, 4.250 and 4.260,
+# so 0.25" clears every real value with margin while excluding PIAZZA's 3.437" decoy outright.
+GEN_TAB_INSET_TOL_IN = 0.25
+
+# How close a derived inset has to be to the canonical 4.25" before it is stored as exactly that.
+# Inside this the difference is modelling noise; outside it the product genuinely differs and the
+# measured value is kept (and logged), because a stored link is per-product by construction.
+GEN_TAB_SNAP_IN = 0.01
+
+
+@dataclass(frozen=True)
+class TabCandidate:
+    """A chassis dim that could be the hanging-tab spacing."""
+    dim: str
+    value_meters: float
+    inset_in: float          # hanger width - this dim, in inches
+    named: bool              # its feature matches HANGER_FOLLOWER_HINTS
+    labelled_w: bool
+
+
+def find_tab_spacing_candidates(
+    dim_values: dict[str, float],
+    labels: dict[str, str] | None,
+    hanger_w_m: float,
+    types: dict[str, str] | None = None,
+    tol_in: float = GEN_TAB_INSET_TOL_IN,
+) -> list[TabCandidate]:
+    """Chassis dims that could be the hanging-tab spacing, strongest candidate first.
+
+    Identification is by RELATIONSHIP — the spacing sits a constant 4.25" inside the hanger
+    width — and never by sketch number, which differs per product (PIAZZA carries it in
+    `D1@Sketch39`, AMBER in `D1@Sketch81`). The name list survives only as a tie-break for the
+    products it was written for.
+
+    More than one result means the model is genuinely ambiguous and the caller must not guess:
+    a wrong 15.75" write once destroyed HANGING TAB LOCATIONS.
+
+    Intended for RULE GENERATION, which runs on an aligned model. The resize-time follower
+    deliberately does NOT use this — see `interpret._hanger_follower_updates`.
+    """
+    if hanger_w_m <= 0:
+        return []
+    labels = labels or {}
+    cands: list[TabCandidate] = []
+    for name, value in dim_values.items():
+        if not policy.is_chassis(name, types):
+            continue
+        if policy.is_hanger(name, None, types):
+            continue                  # the hanger's own dims are the selector's business
+        if policy.is_mate_dim(name):
+            continue                  # a mate is a POSITION; 12203's D1@Distance1 lands here
+        inset_in = (hanger_w_m - value) / 0.0254
+        if abs(inset_in - EXPECTED_TAB_INSET_IN) > tol_in:
+            continue
+        upper = name.upper()
+        cands.append(TabCandidate(
+            dim=name,
+            value_meters=value,
+            inset_in=inset_in,
+            named=any(h in upper for h in HANGER_FOLLOWER_HINTS),
+            labelled_w=labels.get(name) == "W",
+        ))
+    if not cands:
+        return []
+
+    # Narrow by the strongest evidence available. The axis label is never a GATE: the labeler
+    # only labels dims near a bounding-box extent and the tab spacing is internal, so on some
+    # products it carries no [W] at all and gating on it is a second way to match nothing.
+    named = [c for c in cands if c.named]
+    if named:
+        cands = named                 # AMBER/KELLY/9535 keep the exact dim they always used
+    else:
+        labelled = [c for c in cands if c.labelled_w]
+        if labelled:
+            cands = labelled
+    cands.sort(key=lambda c: abs(c.inset_in - EXPECTED_TAB_INSET_IN))
+    return cands
 
 TARGET_AREA_FRACTION = 0.20   # "roughly 20%" — soft target; under it is flagged, not rejected
 MAX_AREA_FRACTION = 0.25      # the binding ceiling: never exceed 25% if anything fits under it
