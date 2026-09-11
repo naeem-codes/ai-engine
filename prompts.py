@@ -98,8 +98,6 @@ def rules_system_prompt(
 The dimension list below is already labeled by the app — trust these labels:
   [W] = controls width
   [H] = controls height
-  [D] = controls thickness / depth (the Z axis) — ignore completely; rules cover
-        width and height only, so a [D] dim NEVER belongs in any rule
   [?] = internal/fixed — ignore completely
 
 Your ONLY job:
@@ -115,7 +113,6 @@ Your ONLY job:
 Each dimension below is pre-labeled by the application — trust these labels:
   [W] = controls width
   [H] = controls height
-  [D] = thickness/depth — DO NOT include in any rule
   [?] = internal/fixed — DO NOT include in any rule
 
 Master dims (already identified by app):
@@ -148,7 +145,7 @@ Master dims (already identified by app):
 -- FIXED-SIZE COMPONENTS — NEVER PUT THESE IN ANY RULE ------------------------
   These are catalogue hardware. They keep their as-built size at every product size and
   are repositioned by the assembly's existing mates, so they get NO rule on either axis.
-  Put each of their dims in "skip" instead, with the reason:
+  Leave every one of their dims out of width_rules and height_rules entirely:
     - LED power supply  (e.g. "LPM-…")
     - LED clips / mirror clips  (e.g. "…-CLIP-…")
     - LED brackets  (e.g. "…-LED-BRACKET-…")
@@ -158,7 +155,7 @@ Master dims (already identified by app):
       whichever axis it is labeled, because a strip mounted vertically has its length
       labeled [H] while one mounted horizontally has it labeled [W];
     - the strip's CROSS-SECTION (small dims under ~50 mm, e.g. a 12.7 mm profile width)
-      NEVER scales on any axis. Put those in "skip".
+      NEVER scales on any axis. Leave those out of every rule.
   The chassis is NOT fixed — it resizes normally.
 
 -- MASTER: THE MIRROR GLASS DRIVES EVERYTHING --------------------------------
@@ -168,8 +165,8 @@ Master dims (already identified by app):
   axis that must scale with it. Do NOT give any other component its own rule.
 
 -- STRICT RULES ---------------------------------------------------------------
-  - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] or [D] dim
-  - height_rules must ONLY contain [H] labeled dims — NEVER include any [W] or [D] dim
+  - width_rules must ONLY contain [W] labeled dims — NEVER include any [H] dim
+  - height_rules must ONLY contain [H] labeled dims — NEVER include any [W] dim
   - NEVER include the if_changes dim inside its own also_change list
   - NEVER repeat the same dim twice in also_change
 
@@ -187,9 +184,6 @@ RESPOND WITH A SINGLE JSON OBJECT ONLY — no markdown, no code fences.
       "if_changes": "exact [H] dim name from the list",
       "also_change": ["exact [H] dim name", "..."]
     }}
-  ],
-  "skip": [
-    {{"name": "exact dim name", "reason": "why skipped"}}
   ],
   "component_labels": {{
     "exact-component-id": "Human Readable Name"

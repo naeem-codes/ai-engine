@@ -190,11 +190,21 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         if entry.get("if_changes")
     ]
 
-    skip = [
-        SkipEntry(name=entry.get("name", ""), reason=entry.get("reason", ""))
-        for entry in data.get("skip", [])
-        if entry.get("name")
-    ]
+    # `skip` is NOT asked of the LLM any more, and is built from the model instead.
+    #
+    # It used to be the single most expensive thing in this call. Measured 2026-09-11 on MOMO:
+    # the response was 9,413 chars and `skip` was 8,401 of them - 89% of the output, and output
+    # is generated one token at a time, so it was ~40 s of a 45 s call. For 79 entries carrying
+    # 14 distinct reasons, repeated over and over.
+    #
+    # Nothing consumed it. It is not saved (no `skip` key in any .rules.json), /get-rules does
+    # not return it, no prompt receives it back, and no resize logic reads it - it is drawn once
+    # as grey rows in the Generate Rules dialog, logged, and dropped. And it never protected the
+    # fixed-size hardware either: LPM / clips / brackets / hanger are excluded below by
+    # policy.filter_axis_dims, in Python, whatever the LLM says.
+    #
+    # So the same rows are now assembled from what is already known for free (see below).
+    skip: list[SkipEntry] = []
 
     component_labels = data.get("component_labels", {})
     if not isinstance(component_labels, dict):
@@ -286,6 +296,31 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         hint = policy.label_suggests_fixed_size(name, component_labels)
         if hint:
             log(f"    NOTE {name} — {hint}; kept resizable (part number wins)")
+
+    # The second half of the skip list: a dim the app labelled [W] or [H] that policy did not
+    # block yet still did not make it into a rule. Those are the ones actually worth an eye in
+    # the UI - a real axis dim that no rule will drive. Everything else that is absent is
+    # unlabelled internal detail, which is the normal case and not interesting one row at a
+    # time, so it is summarised on a single line instead of listing hundreds.
+    in_rules = set()
+    for r in width_rules + height_rules:
+        in_rules.add(r.if_changes)
+        in_rules.update(r.also_change)
+    already_skipped = {s.name for s in skip}
+    for name in dict.fromkeys(w_labeled + h_labeled):
+        if name in in_rules or name in already_skipped:
+            continue
+        already_skipped.add(name)
+        skip.append(SkipEntry(
+            name=name,
+            reason=f"labelled [{labels.get(name, '?')}] but not picked up by any rule"))
+
+    unlisted = [d.name for d in req.dimensions
+                if d.name not in in_rules and d.name not in already_skipped]
+    if unlisted:
+        skip.append(SkipEntry(
+            name=f"+ {len(unlisted)} more dimension(s)",
+            reason="internal detail - unlabelled and not on a resize axis"))
 
     part_label = data.get("part_label", "")
     if not isinstance(part_label, str):
