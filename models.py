@@ -20,6 +20,21 @@ class MatePositionIn(BaseModel):
     component: str
     axis: str                     # "W", "H" or "D"
     extent_meters: float = 0.0    # the component's own size on that axis
+    # Where the component actually SITS, measured by the app against the mirror's centre:
+    # `offset_meters` is signed, on this mate's own axis; `radius_meters` is its distance from the
+    # centre in the W/H plane. Only a ROUND product uses them -- a disc has no per-axis edge to
+    # hold a distance from, so its containment check has to be radial. 0 means "the app did not
+    # measure it", which leaves an older app behaving exactly as it used to.
+    offset_meters: float = 0.0
+    radius_meters: float = 0.0
+    # The radius this component must stay INSIDE on a round product -- the inner face of the
+    # first concentric ring outboard of it, which on ECLIPSE is the LED channel. Measured by the
+    # app; 0 means nothing rings it and only the chassis rim limits the part.
+    keep_out_meters: float = 0.0
+    # This component is MATED TO THE HANGER: its tab drops into one of the hanger's slots, so it
+    # travels with the HANGER's edge, not with the glass. Stretching the hanger without moving it
+    # slides the slot out from under the tab.
+    on_hanger: bool = False
     # What to multiply the master's half-delta by. Measured by the app, which nudges the mate and
     # watches which way the component actually goes, so it carries BOTH the side of the glass the
     # component sits on and how hard the mate drives it (a mate that moves its part at half rate
@@ -62,6 +77,32 @@ class InterpretRequest(BaseModel):
     # renaming a part can delete the keyword the policy identifies it by, silently switching off
     # whichever guard depended on it.
     component_types: dict[str, str] = {}
+
+    # ── ROUND mirrors ────────────────────────────────────────────────────────────
+    # `shape` is "round" or "rect", decided by the APP from geometry it already measures: one dim
+    # whose nudge grows TWO bounding extents EQUALLY is driving a circle, where a square part's
+    # width dim moves one axis alone and its height dim the other. A square BOUNDING BOX proves
+    # nothing either way (CLARA 36x36 is genuinely square), which is why the app sends a verdict
+    # instead of the engine guessing from the numbers.
+    #
+    # A round product has exactly ONE size axis and it is carried on the WIDTH master, so every
+    # width mechanism -- rule selection, constant-offset dependents, the mate half-delta follower
+    # -- applies unchanged. `master_height_dim` comes back None deliberately: on a round assembly
+    # the [H] dims all belong to the hardware (on ECLIPSE the nearest [H] dim to the 762 mm glass
+    # is the hanger's own 254 mm one), so a height master would aim "change the height" at the
+    # hanger.
+    #
+    # `master_radial`: 1 = the master IS the diameter, 2 = it is a RADIUS, so a diameter target
+    # must be halved before it is written. `radial_dims` carries the same 1/2 verdict for every
+    # dim proven to drive a circle, so a radius-driven dependent takes HALF the master delta.
+    # All three default to the rectangular behaviour, so an older app is byte-for-byte unchanged.
+    shape: str = "rect"
+    master_radial: int = 0
+    radial_dims: dict[str, int] = {}
+
+    @property
+    def is_round(self) -> bool:
+        return (self.shape or "").strip().lower() == "round"
 
 
 class DimensionChange(BaseModel):
@@ -131,6 +172,15 @@ class GenerateRulesRequest(BaseModel):
     dim_axis_labels: dict[str, str] = {}
     master_width_dim: str | None = None
     master_height_dim: str | None = None
+    # Same round context as InterpretRequest -- the generator needs it too, or it rebuilds a
+    # height axis out of the hardware dims the labeller left on [H].
+    shape: str = "rect"
+    master_radial: int = 0
+    radial_dims: dict[str, int] = {}
+
+    @property
+    def is_round(self) -> bool:
+        return (self.shape or "").strip().lower() == "round"
 
 
 class RulePair(BaseModel):

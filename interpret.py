@@ -1,4 +1,5 @@
 import json
+import math
 import chassis_slots
 import hanger_select
 import resize_policy as policy
@@ -47,7 +48,8 @@ def _axis_of(dim: str, model_rules, labels: dict[str, str]) -> str:
     return "height"
 
 
-def _dependent_value(current: float, master_current: float, master_new: float) -> float | None:
+def _dependent_value(current: float, master_current: float, master_new: float,
+                     radial_kind: int = 0) -> float | None:
     """A dependent's new value, or None if the dim must be LEFT ALONE.
 
         new_dep = current + (master_new - master_current)
@@ -68,12 +70,43 @@ def _dependent_value(current: float, master_current: float, master_new: float) -
     this class of error by making it small rather than correct.
 
     With no usable master value, fall back to the target itself (previous behaviour).
+
+    `radial_kind` handles the ROUND case. The offset is still constant, but a dim that drives a
+    RADIUS moves the outline twice as fast as the master diameter does, so it takes HALF the
+    delta -- 12419-RING's D1@Sketch1 grew the ring 5.08 mm on a 2.54 mm nudge. Giving it the
+    full delta would grow that feature to double what the mirror did. A diameter-driven dim
+    (kind 1) and a plain linear dim (kind 0) both take the delta as-is.
     """
     if master_current <= 0:
         return master_new
-    if not policy.is_frame_spanning(current, master_current):
+    # A RADIUS dim measures HALF the outline it drives, so a genuinely frame-spanning one is
+    # inherently ~0.5 of the master diameter -- landing exactly ON MIN_DEPENDENT_FRACTION, the
+    # threshold that separates a frame-spanning dim from a fixed extrusion profile. Comparing its
+    # raw value would make that call a coin flip; compare the DIAMETER it stands for instead.
+    # This does not loosen the guard for the small stuff: ECLIPSE's 12419-RING D1@Sketch1
+    # (50.80 mm) and the LED band's D2@Sketch1 (49.30 mm) are radial, and doubled they still come
+    # to 13% of the 762 mm glass, so both stay correctly classed as fixed profiles.
+    span_value = current * 2 if radial_kind == policy.RADIAL_RADIUS else current
+    if not policy.is_frame_spanning(span_value, master_current):
         return None
-    return current + (master_new - master_current)
+    return current + policy.radial_delta(master_new - master_current, radial_kind)
+
+
+def _current_master_in(req: InterpretRequest) -> float:
+    """The glass size the model has RIGHT NOW, in inches, off the width master.
+
+    Not the target: this is the denominator for "what fraction of the disc is the hanger today",
+    and using the target instead would make the answer depend on where you are going rather than
+    where you are.
+    """
+    master = req.master_width_dim
+    if not master:
+        return 0.0
+    for d in req.dimensions:
+        if d.name == master:
+            half = 1.0 if req.master_radial == 2 else 1.0   # a diameter master IS the width
+            return d.value_meters * half / 0.0254
+    return 0.0
 
 
 def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
@@ -101,6 +134,13 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
 
     glass_w = master_value(req.master_width_dim)
     glass_h = master_value(req.master_height_dim)
+    if req.is_round and glass_w > 0:
+        # A circle has no separate height. Without this glass_h reads 0 (there is no height
+        # master by design) and the whole hanger step bails out with "no master glass
+        # width/height available" — i.e. a round mirror would silently never get a hanger.
+        # The AREA is corrected to pi*d^2/4 inside the selector; passing d twice here only says
+        # how big the glass is on each axis, which for a circle is the diameter both times.
+        glass_h = glass_w
     if glass_w <= 0 or glass_h <= 0:
         log("  [HANGER] skipped — no master glass width/height available")
         return [], None
@@ -194,7 +234,12 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
                                   fitted_w_in=fitted_w / 0.0254,
                                   fitted_h_in=fitted_h / 0.0254,
                                   chassis_w_in=chassis_w / 0.0254,
-                                  obstacle_clear_in=obstacle_clear_in)
+                                  obstacle_clear_in=obstacle_clear_in,
+                                  round_glass=req.is_round,
+                                  # The diameter the fitted hanger is on TODAY. A round product
+                                  # scales it by the change, instead of re-deriving a span from
+                                  # the rectangle rules - which is what stopped it coming back.
+                                  fitted_glass_w_in=_current_master_in(req))
     for line in choice.log_lines():
         log("  " + line)
 
@@ -383,6 +428,10 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
     narrow exception: only mates the app has confirmed are measured against an ASSEMBLY plane, only
     on the axis whose master actually moved, and only by half that master's delta.
 
+    **None of the above applies to a ROUND product.** A disc has no per-axis edge to hold a
+    distance from, so its hardware keeps its SHARE of the disc instead: the radius scales with the
+    hanger's own X factor, capped so nothing fouls the LED channel. See `_round_shifts`.
+
     Returns (dim_name, new_value_meters, current_value_meters, component).
     """
     if not req.mate_positions:
@@ -399,7 +448,16 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
             if abs(delta) > 1e-9:
                 half_delta[axis] = delta / 2.0
 
-    if not half_delta:
+    # A ROUND product does not play by this rule at all — see `_round_shifts`.
+    round_shifts: dict[tuple[str, str], float] = {}
+    seat_shifts: dict[tuple[str, str], float] = {}
+    if req.is_round:
+        # The hanger seats first: everything else takes its X from what the seated brackets did.
+        seat_shifts = _hanger_seat_shifts(req, applied, current, hanger)
+        round_shifts = _round_shifts(req, applied, current, seat_shifts)
+        if not round_shifts and not seat_shifts:
+            return []
+    elif not half_delta:
         return []
 
     # The MASTER's own component must never be moved by its own resize. The real AMBER carries
@@ -416,9 +474,20 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
     out: list[tuple[str, float, float, str]] = []
     seen: set[str] = set()
     for mate in req.mate_positions:
-        shift = half_delta.get(mate.axis)
-        if shift is None:
-            continue
+        if req.is_round:
+            # A part seated in the hanger's slots is governed by the HANGER, never by the disc.
+            # The two rules would fight, and the slot wins: a bracket half an inch out of its
+            # slot is not fitted, however tidily it sits on the circle.
+            shift = (seat_shifts if mate.on_hanger else round_shifts
+                     ).get((mate.component, mate.axis))
+            if shift is None or abs(shift) < 1e-9:
+                log(f"  [MATE] {mate.dim} HELD at {mate.value_meters / 0.0254:.3f}\" — "
+                    f"{mate.component} does not need to move on this resize")
+                continue
+        else:
+            shift = half_delta.get(mate.axis)
+            if shift is None:
+                continue
         if mate.dim in applied or mate.dim in seen:
             continue          # already being written — never shift a value twice
         if mate.component in master_comps:
@@ -436,7 +505,8 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
 
         # A clip lines up with the hanging tabs when those moved — same load path, and it
         # replaces the edge offset rather than adjusting it.
-        tab_half = _clip_tab_alignment(hanger, changes) if mate.axis == "W" else None
+        tab_half = (_clip_tab_alignment(hanger, changes)
+                    if mate.axis == "W" and not req.is_round else None)
         if tab_half and policy.is_clip(mate.component, req.component_types):
             log(f"  [MATE] {mate.dim} aligned to the hanging tabs at "
                 f"{tab_half / 0.0254:.3f}\" (was heading for {new_val / 0.0254:.3f}\")")
@@ -451,11 +521,209 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         if new_val <= 0:
             log(f"  [MATE] {mate.dim} SKIPPED — would go to {new_val * 1000:.2f} mm")
             continue
+        why = ((f"moved {shift / 0.0254:+.3f}\" with the hanger's {mate.axis} edge, so its tab "
+                f"stays in the slot"
+                if mate.on_hanger else
+                f"moved {shift / 0.0254:+.3f}\" along its own radius, so it keeps its share of "
+                f"the disc without fouling the LED")
+               if req.is_round else
+               f"half the {shift * 2 / 0.0254:+.3f}\" master change, keeping its distance from "
+               f"the edge")
         log(f"  [MATE] {mate.dim} holds {mate.component} on {mate.axis}: "
-            f"{base / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" "
-            f"(half the {shift * 2 / 0.0254:+.3f}\" master change, keeping its distance "
-            f"from the edge)")
+            f"{base / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" ({why})")
         out.append((mate.dim, new_val, base, mate.component))
+    return out
+
+
+# How much clear space a positioned part keeps between itself and the rim of a round chassis
+# before it counts as hanging off it. A quarter inch — the same margin the no-overlap floor uses,
+# and it also absorbs the chassis disc being drawn a touch inside the glass (ECLIPSE: 59.500"
+# of chassis inside a 60.000" mirror), which is the circle the parts actually have to sit on.
+ROUND_RIM_MARGIN_M = 0.25 * 0.0254
+
+
+def _hanger_seat_shifts(req: InterpretRequest, applied: dict[str, float],
+                        current: dict[str, float], hanger) -> dict[tuple[str, str], float]:
+    """Carry the parts seated in the hanger's slots along with the hanger's edges.
+
+    ECLIPSE hangs off `1004-HANGER`, and `2867-HANGING-BRACKET-1` and `-2` drop their
+    `Edge-Flange1` tabs into slots cut in it. The hanger is 14.250" wide on the Ø30 and its two
+    brackets sit 5.875" either side of centre, so each tab is 1.250" in from the hanger's end.
+
+    **The slot is cut in the hanger, so it travels with the hanger.** Resizing the glass to Ø45
+    stretches the hanger to 29.250", carrying its slots out to 13.375" off centre, while the disc
+    rule was moving the brackets to 8.812" - four and a half inches short, tabs sitting on sheet
+    metal instead of in a slot. Reported live 2026-09-14, after the disc rule itself was right
+    ("the hanger bracket was inside LED correct place... but not inside hanger slots").
+
+    **The law is a CONSTANT OFFSET from the hanger's edge**, which is the same law the rectangular
+    products already use for the mirror of this joint: the chassis HANGING TABS track the hanger's
+    width at a fixed 4.250" inset, verified on two of the client's products
+    ([[project_hanger_tab_follows_width]] -- and see `HangerSelection.follower_dims`, whose whole
+    job is that). So the part moves by exactly as much as the hanger's edge moves on that axis,
+    which also keeps a part sitting PAST the hanger's edge at the same distance past it.
+
+    Returns (component, axis) -> metres the part must travel. Components the hanger does not move
+    are simply absent, which leaves them held rather than guessed at.
+    """
+    if hanger is None or not req.mate_positions:
+        return {}
+
+    seated = {m.component for m in req.mate_positions if m.on_hanger}
+    if not seated:
+        return {}
+
+    # How far each of the hanger's edges moved. Half the size change: the hanger is centred, so
+    # each end travels half of what its overall dimension does.
+    edge: dict[str, float] = {}
+    for axis, dim, target in (("W", hanger.width_dim, hanger.target_width_meters),
+                              ("H", hanger.height_dim, hanger.target_height_meters)):
+        if not dim or target <= 0 or dim not in current:
+            continue
+        # `applied` wins when the hanger is being STRETCHED (the write is in this batch);
+        # `target` covers a catalogue SWAP, which changes the size with no dimension write.
+        now = applied.get(dim, target)
+        moved = (now - current[dim]) / 2.0
+        if abs(moved) > 1e-9:
+            edge[axis] = moved
+
+    if not edge:
+        log("  [MATE] the hanger is not changing size, so the parts seated in it stay put")
+        return {}
+
+    out: dict[tuple[str, str], float] = {}
+    for mate in req.mate_positions:
+        if mate.component in seated and mate.axis in edge:
+            out[(mate.component, mate.axis)] = edge[mate.axis]
+    for axis, moved in sorted(edge.items()):
+        log(f"  [MATE] the hanger's {axis} edge moves {moved / 0.0254:+.3f}\"; "
+            f"{', '.join(sorted(seated))} follow it so their tabs stay in the slots")
+
+    # A seated part is NOT clamped back to the LED keep-out, on purpose. Its slot is cut in the
+    # hanger, so pulling the part off the slot to clear the ring leaves it fitted to nothing and
+    # still under the ring. If the two genuinely collide the hanger is too big for that disc, and
+    # saying so is worth more than quietly splitting the difference.
+    master = req.master_width_dim
+    if master and master in applied:
+        rim = applied[master] / (1.0 if req.master_radial == 2 else 2.0)
+        for comp in sorted(seated):
+            axes = {m.axis: m.offset_meters + out.get((comp, m.axis), 0.0)
+                    for m in req.mate_positions if m.component == comp}
+            keep = max((m.keep_out_meters for m in req.mate_positions
+                        if m.component == comp), default=0.0)
+            if len(axes) < 2 or keep <= 0:
+                continue
+            grown = rim - current.get(master, rim) / (1.0 if req.master_radial == 2 else 2.0)
+            r = math.hypot(axes.get("W", 0.0), axes.get("H", 0.0))
+            if r > keep + grown:
+                log(f"  [MATE] ⚠ {comp} follows the hanger out to {r / 0.0254:.3f}\" from "
+                    f"centre, past the LED channel at {(keep + grown) / 0.0254:.3f}\". The hanger "
+                    f"is too wide for this disc - the slot itself is under the ring, so moving "
+                    f"the bracket would not fix it. Check the hanger size.")
+    return out
+
+
+def _round_shifts(req: InterpretRequest, applied: dict[str, float], current: dict[str, float],
+                  seat_shifts: dict[tuple[str, str], float]) -> dict[tuple[str, str], float]:
+    """How far every positioned component travels on each axis, on a ROUND product.
+
+    **X comes from the hanger, Y from the disc.** The hanging brackets that sit in the hanger's
+    slots are moved by the hanger's own edge (`_hanger_seat_shifts`); every OTHER positioned part
+    then takes the SAME X scale factor those brackets got, and keeps the disc's factor on Y.
+
+    That is the user's rule, and it is what keeps a bolted stack together. ECLIPSE's `1005-CLIP`
+    is mated to `2867-HANGING-BRACKET-3`: `Jog4` on the clip has to stay on `Edge-Flange1` on the
+    bracket. Two parts in one stack cannot be moved by two different rules and still touch - and
+    for the same reason brackets 3 and 4 cannot be moved by a different rule from 1 and 2.
+
+    With no hanger-seated bracket to take a factor from (no hanger, or a hanger that is not
+    changing size) X falls back to the disc's own factor, which is the previous behaviour.
+
+    Each component's radius is then checked against the LED channel and the rim exactly as before,
+    and if it would reach past either, BOTH of its axes are scaled back together so the part
+    travels along its own radius rather than swinging.
+
+    Returns (component, axis) -> metres of travel, as a change in DISTANCE FROM THE CENTRE (the
+    caller multiplies by `direction`, which carries the side and the gearing).
+    """
+    master = req.master_width_dim
+    if not master or master not in applied or master not in current:
+        return {}
+    # `master_radial` 2 means the master dim IS a radius; 1 (and the unset default) a diameter.
+    half = 1.0 if req.master_radial == 2 else 2.0
+    r_old, r_new = current[master] / half, applied[master] / half
+    if r_old <= 0 or abs(r_new - r_old) <= 1e-9:
+        return {}
+    k_disc = r_new / r_old
+    grown = r_new - r_old
+
+    # What the seated brackets did to their X, as a factor. Averaged over them, because they are
+    # a symmetric pair and one of them missing its mate should not swing the answer.
+    factors = [(abs(m.offset_meters) + seat_shifts[(m.component, m.axis)]) / abs(m.offset_meters)
+               for m in req.mate_positions
+               if m.on_hanger and m.axis == "W" and abs(m.offset_meters) > 1e-9
+               and (m.component, m.axis) in seat_shifts]
+    k_x = sum(factors) / len(factors) if factors else k_disc
+    if factors:
+        log(f"  [MATE] the hanger's brackets moved their X by x{k_x:.4f}; everything else on the "
+            f"disc follows that on X (the disc itself is x{k_disc:.4f})")
+
+    # Offsets per component, per axis. A component with only ONE mate still has a radius, so the
+    # axis it does not name is recovered from that - without it the move could not stay radial.
+    off: dict[str, dict[str, float]] = {}
+    radius: dict[str, float] = {}
+    overhang: dict[str, float] = {}
+    keep_out: dict[str, float] = {}
+    for mate in req.mate_positions:
+        if mate.on_hanger or mate.radius_meters <= 0 or mate.axis not in ("W", "H"):
+            continue
+        c = mate.component
+        off.setdefault(c, {})[mate.axis] = abs(mate.offset_meters)
+        radius[c] = max(radius.get(c, 0.0), mate.radius_meters)
+        overhang[c] = max(overhang.get(c, 0.0), mate.extent_meters / 2.0)
+        keep_out[c] = max(keep_out.get(c, 0.0), mate.keep_out_meters)
+
+    want: dict[str, tuple[float, float, float, float]] = {}   # comp -> ow, oh, want_w, want_h
+    for comp, axes in off.items():
+        r = radius[comp]
+        ow = axes.get("W")
+        oh = axes.get("H")
+        if ow is None:
+            ow = math.sqrt(max(0.0, r * r - (oh or 0.0) ** 2))
+        if oh is None:
+            oh = math.sqrt(max(0.0, r * r - ow * ow))
+        want[comp] = (ow, oh, ow * k_x, oh * k_disc)
+
+    # ONE hold-back for the whole group, taken from whichever member needs it most.
+    #
+    # Clamping each part by its own size is what pulls a bolted stack apart, and that is the bug
+    # this is here to fix: `1005-CLIP` is 3.000" wide and `2867-HANGING-BRACKET-3` is 1.500", both
+    # sit 4.000" off centre, and clamping them separately moved them by different amounts - the
+    # clip came in further purely because it is wider. On a disc this hardware is one ring and it
+    # keeps its arrangement: the tightest ceiling governs all of it.
+    pull = 1.0
+    tightest = ""
+    for comp, (_ow, _oh, ww, wh) in want.items():
+        # The two ceilings: the LED channel holds a CONSTANT inset from the rim, so it travels the
+        # full radius change while the hardware travels only its share.
+        ceiling = r_new - overhang[comp] - ROUND_RIM_MARGIN_M
+        if keep_out[comp] > 0:
+            ceiling = min(ceiling, keep_out[comp] + grown - overhang[comp] - ROUND_RIM_MARGIN_M)
+        want_r = math.hypot(ww, wh)
+        if ceiling > 0 and want_r > ceiling and ceiling / want_r < pull:
+            pull, tightest = ceiling / want_r, comp
+    if pull < 1.0:
+        log(f"  [MATE] the whole group is held back to {pull:.4f} of where it wanted to go - "
+            f"{tightest} is the part that would have reached the LED. Held together so the parts "
+            f"bolted to each other still line up.")
+
+    out: dict[tuple[str, str], float] = {}
+    for comp, (ow, oh, ww, wh) in want.items():
+        ww, wh = ww * pull, wh * pull
+        if "W" in off[comp] and abs(ww - ow) > 1e-9:
+            out[(comp, "W")] = ww - ow
+        if "H" in off[comp] and abs(wh - oh) > 1e-9:
+            out[(comp, "H")] = wh - oh
     return out
 
 
@@ -477,7 +745,9 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
     2. **half the component's own width plus 1/4"**, a hard geometric guarantee that a mirrored
        pair can never intersect at the centreline even if the ratio above is ever retuned.
     """
-    master = req.master_width_dim if mate.axis == "W" else req.master_height_dim
+    # Round: one master for both axes, for the radial reason documented in the half-delta loop.
+    master = (req.master_width_dim if (mate.axis == "W" or req.is_round)
+              else req.master_height_dim)
     if not master:
         return 0.0
     master_new = applied.get(master, current.get(master, 0.0))
@@ -487,7 +757,14 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
     # it is just an invented lower bound -- on a 56" mirror it would shove any positioned part to
     # at least 9.33" off centre, which for a single top-mounted part like the hanging bracket is
     # simply wrong. The geometric no-overlap bound below is real regardless, so it always applies.
-    is_clip = policy.is_clip(mate.component, req.component_types)
+    # ...and it is a RECTANGLE's rule. It exists because a mirrored PAIR of clips meets at the
+    # centreline of a narrow glass, which is a thing that happens when clips grip the glass edge.
+    # On a round product they do not: ECLIPSE's 1005-CLIP rides on 2867-HANGING-BRACKET-3, bolted
+    # to it. Applying master/6 there pinned the clip at exactly 45/6 = 7.500" while its bracket
+    # went to 6.000", and again at 36/6 = 6.000" against 4.800" - so `Jog4` on the clip walked off
+    # `Edge-Flange1` on the bracket by a size-dependent amount every single resize (reported live
+    # 2026-09-14). The geometric no-overlap bound below is real on any shape and still applies.
+    is_clip = policy.is_clip(mate.component, req.component_types) and not req.is_round
     proportional = master_new / 6.0 if (is_clip and master_new > 0) else 0.0
     no_overlap = mate.extent_meters / 2.0 + 0.25 * 0.0254 if mate.extent_meters > 0 else 0.0
     return max(proportional, no_overlap)
@@ -811,9 +1088,50 @@ def _hanger_note(hanger: HangerSelection | None) -> str:
     return note
 
 
+def _round_circles_left_behind(req: InterpretRequest, master: str, also_change: list[str],
+                               current_dims: dict[str, float]) -> str:
+    """Warn when a ROUND product leaves one of its own concentric circles out of the resize.
+
+    On a disc every concentric circle is the same size axis seen from a different radius, so one
+    that does not move is not a design choice — it is a rule set that has gone stale, and the
+    damage is invisible until SolidWorks refuses to solve.
+
+    Live on ECLIPSE, 2026-09-14. `12419-RING` has no size dimension at all: it is driven IN
+    CONTEXT off an EDGE OF THE GLASS, and the chassis's `Sketch46` in turn CONVERTS ~25 of the
+    ring's edges while carrying `D15@Sketch46` (12.980") and `D17@Sketch46` (13.079") as its own
+    dimensions of that same geometry. At the drawn Ø30 the two agree. Grow the glass and the
+    converted edges travel with it while the dimensions stay put, so `Sketch45` and `Sketch46` go
+    OVER-DEFINED — reported by SolidWorks as
+    `swSketchErrorExtRefFail`, and in the UI as "the sketch is overdefined, consider deleting some
+    overdefining dimensions or relations".
+
+    The app now labels those two dims (it measures them against the ring's own radius), but a
+    RULE SET SAVED BEFORE THAT still lists three dependants and none of them is the channel — so
+    the fix looks applied and changes nothing. Exactly what happened: the run that should have
+    shown it regenerated no rules at all. Hence this line, which says so in the chat.
+    """
+    if not req.is_round or not req.radial_dims:
+        return ""
+    covered = {master} | set(also_change)
+    missed = [d for d in req.radial_dims
+              if d not in covered and d in current_dims and current_dims[d] > 0]
+    if not missed:
+        return ""
+    for d in missed:
+        log(f"  [ROUND] {d!r} draws a circle on this product and no rule moves it "
+            f"({current_dims[d] / 0.0254:.3f}\")")
+    listed = ", ".join(sorted(missed)[:4]) + (" …" if len(missed) > 4 else "")
+    return (f" ⚠ {len(missed)} dimension(s) that draw a circle on this model are not in its "
+            f"rule set, so they will not move: {listed}. On a round product that leaves the "
+            f"sketches that reference them over-defined — regenerate the rules (⚙ Generate Rules) "
+            f"and try again.")
+
+
 def _expand_master(master: str, value_meters: float, also_change: list[str],
-                   current_dims: dict[str, float]) -> list[DimensionChange]:
+                   current_dims: dict[str, float],
+                   radial_dims: dict[str, int] | None = None) -> list[DimensionChange]:
     """One master dim plus its dependents, each moved by the master's CONSTANT OFFSET."""
+    radial_dims = radial_dims or {}
     master_current = current_dims.get(master, 0.0)
     out = [DimensionChange(name=master, value_meters=value_meters)]
     for dep in also_change:
@@ -828,7 +1146,11 @@ def _expand_master(master: str, value_meters: float, also_change: list[str],
         if current is None:
             log(f"    SKIP {dep!r} — not in dims")
             continue
-        new_val = _dependent_value(current, master_current, value_meters)
+        kind = radial_dims.get(dep, 0)
+        new_val = _dependent_value(current, master_current, value_meters, kind)
+        if kind == policy.RADIAL_RADIUS and new_val is not None:
+            log(f"    [ROUND] {dep!r} drives a RADIUS — taking half the "
+                f"{(value_meters - master_current) / 0.0254:+.3f}\" diameter change")
         if new_val is None:
             log(f"    SKIP {dep!r} — {current / master_current:.1%} of the master: a "
                 f"fixed profile, not a frame-spanning dim (left at "
@@ -857,6 +1179,13 @@ def _second_axis_changes(data: dict, scope: str, primary_dim: str, model_rules,
     raw = data.get("other_axis_meters")
     if raw in (None, "") or scope != "overall":
         return [], ""
+    if req.is_round:
+        # A circle has one size. The prompt already tells the model this, so reaching here means
+        # it produced a second number anyway -- applying it would write a diameter onto whatever
+        # the labeller happened to leave on [H], which on a round assembly is hardware.
+        log("  [2-AXIS] ignored — a round mirror has ONE size axis (the diameter)")
+        return [], (" This is a round mirror, so it has a single size: the diameter. "
+                    "Only one value was applied.")
     try:
         other_value = float(raw)
     except (TypeError, ValueError):
@@ -885,7 +1214,43 @@ def _second_axis_changes(data: dict, scope: str, primary_dim: str, model_rules,
     deps = list(rule.also_change) if rule is not None else []
     log(f"  [2-AXIS] also setting the {other_label} master {other_master!r} → "
         f"{other_value / 0.0254:.3f}\" with {len(deps)} dependent(s)")
-    return _expand_master(other_master, other_value, deps, current_dims), ""
+    return _expand_master(other_master, other_value, deps, current_dims, req.radial_dims), ""
+
+
+# How close a dimension has to be to the master's own value before it is treated as THE SAME
+# CIRCLE. 0.5% - on a 30in disc that is 0.15in, while the nearest thing on HALO that is not the
+# same circle (its chassis ring) is 4.6% away and on ECLIPSE (its chassis) 1.7%.
+SAME_CIRCLE_FRACTION = 0.005
+
+
+def _is_the_glass_circle(dim: str, req: InterpretRequest,
+                         current: dict[str, float] | None) -> bool:
+    """Is this dim drawing the GLASS'S OWN circle, whatever the part is called?
+
+    `resize_policy` classifies by NAME, and on a round product that gets HALO wrong.
+    `12646-LED BRACKET-BOTTOM` is an ARC of the disc - its `D1@Sketch1` is 762.00 mm, the glass
+    diameter to the hundredth - but the name says "LED BRACKET", so the policy calls it fixed-size
+    hardware and drops it after the rule has already correctly listed it:
+
+        [POLICY] DROP D1@Sketch1 [12646-LED BRACKET-BOTTOM-1] (1143.00 mm)
+                 - LED bracket is fixed-size hardware - repositioned by its mates, never resized
+
+    So the two LED bracket assemblies stayed at their drawn size through every resize, while the
+    rule set looked right.
+
+    **Measurement beats a name.** Two independent facts have to agree: the app nudged this dim and
+    watched it grow a CIRCLE (`radial_dims`), and its value IS the master's. A hole or a fillet on
+    the same part passes neither. Round products only - on a rectangle nothing here applies.
+    """
+    if not req.is_round or dim not in (req.radial_dims or {}):
+        return False
+    master = req.master_width_dim
+    if not master or not current:
+        return False
+    here, there = current.get(dim), current.get(master)
+    if not here or not there or there <= 0:
+        return False
+    return abs(here - there) <= there * SAME_CIRCLE_FRACTION
 
 
 def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
@@ -893,6 +1258,7 @@ def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
                     axis_hint: str = "",
                     current: dict[str, float] | None = None,
                     types: dict[str, str] | None = None,
+                    req: InterpretRequest | None = None,
                     ) -> tuple[list[DimensionChange], list[str]]:
     """Drop any change that resize_policy forbids. Returns (kept, [reason lines]).
 
@@ -912,6 +1278,11 @@ def _enforce_policy(changes: list[DimensionChange], labels: dict[str, str],
         axis = "width" if lbl == "W" else "height" if lbl == "H" else axis_hint
         reason = policy.block_reason(c.name, axis, component_labels,
                                      (current or {}).get(c.name), types)
+        if reason and req is not None and _is_the_glass_circle(c.name, req, current):
+            log(f"    [POLICY] KEPT {c.name} — the policy calls it fixed-size hardware by name, "
+                f"but it is drawn at the glass's own diameter and the nudge proved it drives a "
+                f"circle. It IS the frame; measurement wins.")
+            reason = ""
         if reason:
             log(f"    [POLICY] DROP {c.name} ({c.value_meters * 1000:.2f} mm) — {reason}")
             notes.append(f"{c.name}: {reason}")
@@ -929,6 +1300,11 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
     log(f"  dim_axis_labels   : {len(req.dim_axis_labels)} entries")
     log(f"  master_width_dim  : {req.master_width_dim or 'null'}")
     log(f"  master_height_dim : {req.master_height_dim or 'null'}")
+    if req.is_round:
+        kind = ("a RADIUS — targets are halved" if req.master_radial == policy.RADIAL_RADIUS
+                else "a DIAMETER")
+        log(f"  shape             : ROUND (master is {kind}, "
+            f"{len(req.radial_dims)} radial dim(s))")
     log(f"  assembly_context  : {len(req.assembly_context or '')} chars")
     if req.dimensions:
         log("  [W] dims: " + ", ".join(
@@ -989,7 +1365,8 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         raw = await call_llm(
             rules_dependent_prompt(rules_json, labels_block,
                                    master_width_dim=req.master_width_dim,
-                                   master_height_dim=req.master_height_dim),
+                                   master_height_dim=req.master_height_dim,
+                                   is_round=req.is_round),
             req.instruction, max_tokens=512)
         try:
             data = json.loads(_strip_fences(raw))
@@ -1019,6 +1396,47 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             on_width = _axis_of(if_changes, model_rules, req.dim_axis_labels) == "width"
             master = req.master_width_dim if on_width else req.master_height_dim
             axis_rules = model_rules.width if on_width else model_rules.height
+
+            # The master is supposed to BE a rule trigger. When it is not, the app has handed us
+            # a dim the rule set treats as a DEPENDENT, and anchoring there quietly drops the real
+            # master: it appears in no `also_change`, so nothing writes it.
+            #
+            # Live on ECLIPSE, 2026-09-14. Its glass `D1@Sketch1 [1026-MIRROR-ECLIPSE-1]` and its
+            # lit ring `D1@Sketch1 [LED FLEX EXTRUSION-ECLIPSE  30]` are BOTH exactly 762.00 mm,
+            # because the ring is drawn at the glass diameter, so whichever the app read first won
+            # the tie -- the glass on one connect, the LED on the next. With the LED as master the
+            # net below could not fire (no rule is keyed on the LED), the chassis and the LED went
+            # to Ø45 and the mirror stayed at Ø30. Every mate solved, SolidWorks reported nothing,
+            # and the crossing check refused the whole resize.
+            #
+            # Follow the dependency back to its trigger: that is the dim the rule was written
+            # around, and it is the one the user means by "the size".
+            if master and not any(r.if_changes == master for r in axis_rules):
+                owner = next((r for r in axis_rules if master in r.also_change), None)
+                if owner is not None:
+                    log(f"  [OVERALL] master {master!r} is a DEPENDENT of {owner.if_changes!r} "
+                        f"- anchoring on the trigger instead")
+                    master = owner.if_changes
+                elif len(axis_rules) == 1:
+                    # The set's own TRIGGER names something this model no longer has, while its
+                    # dependants still name real dims: a fork whose anchor went stale. The anchor
+                    # is the recoverable half - the app measures the master off the model - so
+                    # take the rule's dependants and put them on the master we can see.
+                    #
+                    # HALO 2026-09-15: `#2` listed the six `1111-*` dims the model actually had,
+                    # under a trigger that still said `HALO-60-MIRROR` after a rename to
+                    # `HALO-70-MIRROR`. Without this the whole set was unusable for the sake of
+                    # one name.
+                    live_names = {d.name for d in req.dimensions}
+                    only = axis_rules[0]
+                    if (only.if_changes not in live_names
+                            and any(d in live_names for d in only.also_change)):
+                        log(f"  [OVERALL] the rule's own trigger {only.if_changes!r} is not in "
+                            f"this model; re-anchoring its {len(only.also_change)} dependant(s) "
+                            f"onto the measured master {master!r}")
+                        if_changes = master
+                        also_change = list(only.also_change)
+
             if master and if_changes != master:
                 mrule = next((r for r in axis_rules if r.if_changes == master), None)
                 if mrule is not None:
@@ -1028,6 +1446,19 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
         if not if_changes or value_meters <= 0:
             return InterpretResponse(error="AI returned invalid rule response")
+
+        # ROUND, and the master dim is a RADIUS rather than a diameter. The user always speaks in
+        # diameters ("make it 40 inches" = a 40" circle), so the value has to be halved before it
+        # is written or the mirror comes out twice the size asked for. Only ever applied to the
+        # master itself, and only on an overall change: a named-component request is already in
+        # that dim's own terms. Not seen on ECLIPSE -- its glass is dimensioned Ø762 mm, ratio
+        # 1.00 -- but the app measures the difference per product, so it has to be honoured.
+        if (req.is_round and scope == "overall"
+                and req.master_radial == policy.RADIAL_RADIUS
+                and if_changes == req.master_width_dim):
+            log(f"  [ROUND] master {if_changes!r} is a RADIUS dim — halving the requested "
+                f"{value_meters / 0.0254:.3f}\" diameter to {value_meters / 2 / 0.0254:.3f}\"")
+            value_meters = value_meters / 2.0
 
         # Refuse outright when the user targeted a fixed-size component, rather than
         # silently applying nothing: the master dim is NOT a substitute for it.
@@ -1047,7 +1478,23 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             return InterpretResponse(error=limit_error)
 
         current_dims = {d.name: d.value_meters for d in req.dimensions}
-        changes = _expand_master(if_changes, value_meters, also_change, current_dims)
+
+        # A rule that names dependants of which NOT ONE exists here is not describing this model.
+        # Writing the master on its own is the worst possible outcome - it rebuilds, it saves, and
+        # the whole frame is left at the old size. That is exactly what HALO did on 2026-09-15
+        # (0 of 7 dims present), and only the crossing check caught it, after the fact.
+        if also_change and not any(d in current_dims for d in also_change):
+            missing = ", ".join(sorted(also_change)[:3])
+            return InterpretResponse(error=(
+                f"This model's rule set does not match it: none of the {len(also_change)} "
+                f"dimension(s) it wants to change exist here ({missing}"
+                f"{' …' if len(also_change) > 3 else ''}). Resizing the master on its own would "
+                f"leave the frame behind, so nothing was written. Regenerate the rules "
+                f"(⚙ Generate Rules) for this model."))
+
+        changes = _expand_master(if_changes, value_meters, also_change, current_dims,
+                                 req.radial_dims)
+        rules_note += _round_circles_left_behind(req, if_changes, also_change, current_dims)
 
         # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this
         # the other axis was silently dropped and the explanation told the user to submit it
@@ -1115,7 +1562,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         # expand_positions/expand_offsets can add one too. Nothing gets past here.
         changes, dropped = _enforce_policy(changes, req.dim_axis_labels,
                                            model_rules.component_labels, trigger,
-                                           current_dims, req.component_types)
+                                           current_dims, req.component_types, req)
         if not changes:
             return InterpretResponse(error="Every dimension in this change is fixed-size "
                                            "hardware that cannot be resized.")
@@ -1161,9 +1608,10 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         for dim, new_val, _old, comp in mates:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
         if mates:
+            why = ("back inside the rim, which has come in past them" if req.is_round
+                   else "to keep the same distance from the edge")
             explanation += (f" Moved {len(mates)} positioned component(s) "
-                            f"({', '.join(sorted({m[3] for m in mates}))}) to keep the same "
-                            f"distance from the edge.")
+                            f"({', '.join(sorted({m[3] for m in mates}))}) {why}.")
 
         _log_changes("CASE 2 rules changes", changes)
         return InterpretResponse(changes=changes, explanation=explanation, hanger=hanger)

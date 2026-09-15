@@ -88,13 +88,24 @@ ROUND_TO_IN = 1.0 / 16.0
 
 
 
-def max_length_in(chassis_width_in: float, spec: SlotSpec) -> float:
+def max_length_in(chassis_width_in: float, spec: SlotSpec, scale: float = 1.0) -> float:
     """Longest centre-to-centre slot that still fits at this chassis width.
 
-    Straight from the module docstring's inequality; can come out <= 0 on an absurdly narrow
-    chassis, which callers must treat as "no slot length works here".
+    Straight from the module docstring's inequality, with one correction: **the INSET scales with
+    the part.** It is a position measured from the end of the chassis, so when the chassis moves
+    the slots move with it, exactly like every other position this app writes.
+
+    Holding it fixed makes a shrink look impossible. HALO, live 2026-09-15: the inset measured
+    17.833" on the 58.25" chassis, the chassis was going to 28.250", and two fixed 17.833" insets
+    leave NOTHING between them - the span came out negative and the limit -4.043", so the caller
+    read "nothing fits at this width" and left the slots at 8.188" on a 28" part. `Sketch12` and
+    `Cut-Extrude2` then failed the moment the chassis was written, and took the resize with them.
+
+    Can still come out <= 0 on a genuinely absurd width, which callers must treat as "no slot
+    length works here".
     """
-    span = (chassis_width_in + 2 * spec.gauge_in) - 2 * spec.inset_in
+    inset = spec.inset_in * (scale if scale > 0 else 1.0)
+    span = (chassis_width_in + 2 * spec.gauge_in) - 2 * inset
     gaps = (spec.count - 1) * spec.min_gap_in
     return (span - gaps) / spec.count - spec.slot_width_in
 
@@ -121,7 +132,7 @@ def slot_length_for(chassis_width_in: float, spec: SlotSpec,
     """
     if scale <= 0:
         return None
-    limit = max_length_in(chassis_width_in, spec)
+    limit = max_length_in(chassis_width_in, spec, scale)
     if limit <= 0:
         return None                     # nothing fits at this width; no length can rescue it
 
@@ -144,10 +155,11 @@ def log_lines(chassis_width_in: float, spec: SlotSpec, target_in: float | None,
     Says which of the two numbers won — the scaled target or the fit ceiling — because when a
     grown slot comes out shorter than the ratio asked for, that clamp is the only explanation.
     """
-    limit = max_length_in(chassis_width_in, spec)
+    limit = max_length_in(chassis_width_in, spec, scale)
     scaled = spec.stock_length_in * scale
     head = (f"[SLOTS] {spec.part} at {chassis_width_in:.3f}\" chassis: {spec.count} slots + "
-            f"{spec.count - 1} gaps between {spec.inset_in:.3f}\" insets → longest that fits is "
+            f"{spec.count - 1} gaps between {spec.inset_in * scale:.3f}\" insets "
+            f"(x{scale:.4f} with the part) → longest that fits is "
             f"{limit:.3f}\" (from {spec.stock_length_in:.3f}\", scaled x{scale:.4f} "
             f"= {scaled:.3f}\"{' — CLAMPED to the fit limit' if scaled > limit else ''})")
     if target_in is None:

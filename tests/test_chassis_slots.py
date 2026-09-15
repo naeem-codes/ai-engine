@@ -105,11 +105,16 @@ def test_growth_is_proportional():
 
 def test_the_fit_ceiling_still_wins_over_the_ratio():
     """Shrinking asks for 4.456"; that fits, so the ratio is used. Growth is what gets clamped —
-    and on the narrow side the ceiling must override any ratio that overshoots it."""
-    # A deliberately wrong scale that asks for more than the width can hold.
+    and on the narrow side the ceiling must override any ratio that overshoots it.
+
+    The ceiling number moved from 6.25" to 2.25" when the INSET started scaling with the part
+    (2026-09-15). This pair is deliberately inconsistent — scale 3.0 against a width that SHRANK —
+    so the scaled inset is nonsense here too; what the test protects is unchanged and is the last
+    assertion: whatever comes out, the row physically fits."""
     target = slot_length_for(_width(35.0), AMBER_60, 3.0)
     assert target is not None
-    assert target == pytest.approx(6.25), "the ratio was allowed past the fit limit"
+    assert target < 3.0 * AMBER_60.stock_length_in, "the ratio was allowed past the fit limit"
+    assert target == pytest.approx(2.25)
     assert 4 * (target + AMBER_60.slot_width_in) + 3 * 0.25 <= 35.118 + 1e-9
 
 
@@ -147,8 +152,36 @@ def test_never_rounds_up_past_what_fits():
 
 
 def test_absurdly_narrow_chassis_gives_up_rather_than_writing_nonsense():
-    assert slot_length_for(9.0, AMBER_60, 9.0 / BBOX) is None
+    """What counts as impossible changed on 2026-09-15, and narrowed to the right thing.
+
+    The inset now scales with the part, so a proportional shrink no longer runs out of room just
+    because a full-size inset was held against a small chassis — that was the HALO bug. What
+    still cannot fit is the part that does NOT scale: the slot's own width and the minimum gap.
+    On AMBER_60 that floor is 4 x 0.28 + 3 x 0.25 = 1.87", so a 2" chassis is refused and a 9" one
+    is now feasible with short slots and short insets."""
     assert slot_length_for(1.0, AMBER_60, 1.0 / BBOX) is None
+    assert slot_length_for(2.0, AMBER_60, 2.0 / BBOX) is None
+    feasible = slot_length_for(9.0, AMBER_60, 9.0 / BBOX)
+    assert feasible is not None
+    inset = AMBER_60.inset_in * (9.0 / BBOX)
+    assert (4 * (feasible + AMBER_60.slot_width_in) + 3 * AMBER_60.min_gap_in
+            <= 9.0 - 2 * inset + 1e-9)
+
+
+def test_a_shrink_is_not_refused_just_because_the_inset_was_measured_big():
+    """HALO, live 2026-09-15. The inset measured 17.833" on the 58.25" chassis; the chassis was
+    going to 28.250". Held fixed, two of those insets leave NOTHING between them — the fit limit
+    came out **-4.043"**, the caller read "nothing fits at this width", and the slots stayed at
+    8.188" on a 28" part. `Sketch12` and `Cut-Extrude2` failed the moment the chassis was written
+    and took the whole resize with them."""
+    halo = replace(AMBER_60, part="1111-CHASSIS-1", stock_length_in=8.188, count=2,
+                   slot_width_in=0.210, inset_in=17.833, gauge_in=0.0)
+    scale = 28.250 / 58.250
+    assert max_length_in(28.250, halo, 1.0) < 0          # what it used to compute
+    assert max_length_in(28.250, halo, scale) > 0        # and what it computes now
+    target = slot_length_for(28.250, halo, scale)
+    assert target is not None, "the slots were left at 8.188 on a 28in chassis again"
+    assert target == pytest.approx(halo.stock_length_in * scale, abs=chassis_slots.ROUND_TO_IN)
 
 
 def test_a_nonsense_scale_is_refused():

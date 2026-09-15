@@ -1,16 +1,4 @@
-def rules_dependent_prompt(rules_json: str, labels_block: str = "",
-                           master_width_dim: str | None = None,
-                           master_height_dim: str | None = None) -> str:
-    mw = master_width_dim or "null"
-    mh = master_height_dim or "null"
-    return f"""You are a SolidWorks CAD resize assistant.
-
-These are the resize rules defined for this assembly:
-{rules_json}
-{labels_block}
-The user will describe a resize in natural language referencing a component or dimension.
-
-MASTER DIMENSIONS (the overall outside size of the whole mirror):
+_RECT_SIZE_BLOCK = """MASTER DIMENSIONS (the overall outside size of the whole mirror):
   master width  = {mw}
   master height = {mh}
 
@@ -31,6 +19,54 @@ BOTH AXES IN ONE REQUEST ("24 x 36", "resize to 40 x 30", "make it 24 wide and 3
   - NEVER tell the user to submit the second number as a separate request — it is handled here.
     Say plainly that both the width and the height are being set.
 
+"""
+
+_ROUND_SIZE_BLOCK = """THIS MIRROR IS ROUND. It has ONE size — its DIAMETER. There is no
+separate width and height, and there is deliberately no height master dim for it.
+
+  master diameter = {mw}
+
+OVERALL SIZE CHANGE — THE MOST COMMON REQUEST (e.g. "make it 40 inches", "resize to 36",
+"change the diameter to 48", "40 inch mirror"):
+  - The user means the WHOLE mirror's outside DIAMETER — NOT any single component.
+  - Set "if_changes" to EXACTLY the master diameter dim above (copy it verbatim).
+  - Set "scope" to "overall".
+  - Set "also_change" to that rule's own also_change list from the rules JSON.
+  - "width", "height", "size", "across" and "diameter" ALL mean the diameter here. Treat
+    "make it 40 wide" and "make it 40 tall" as the same request: diameter = 40.
+  - NEVER set "other_axis_meters" — there is no second axis. One number is the whole request.
+  - IMPORTANT: Do NOT pick a dim just because its NAME contains "WIDTH" or "HEIGHT". A dim
+    like "D1@WIDTH [LPM-...]" is one small component's own width (often only 2-3 inches) —
+    it is NOT the mirror's diameter. Choosing it would blow the assembly up.
+
+TWO NUMBERS ON A ROUND MIRROR ("40 x 30", "make it 40 wide and 30 tall"):
+  - Not a valid shape for this product — a circle cannot be 40 by 30.
+  - Return {{"error": "This is a round mirror, so it has a single size: the diameter. Give one
+    value, e.g. 'make it 40 inches'. An oval or a rectangle would be a different product."}}
+    and pick NO rule.
+
+"""
+
+def rules_dependent_prompt(rules_json: str, labels_block: str = "",
+                           master_width_dim: str | None = None,
+                           master_height_dim: str | None = None,
+                           is_round: bool = False) -> str:
+    mw = master_width_dim or "null"
+    mh = master_height_dim or "null"
+    # A ROUND mirror has ONE size, so the width/height sections are replaced wholesale rather
+    # than patched: leaving them in is how the model learns to invent a second number, and on a
+    # circle a second number can only land on hardware. `is_round` comes from the app's
+    # measurement of the geometry, never from the model name -- see InterpretRequest.shape.
+    size_block = (_ROUND_SIZE_BLOCK.format(mw=mw) if is_round
+                  else _RECT_SIZE_BLOCK.format(mw=mw, mh=mh))
+    return f"""You are a SolidWorks CAD resize assistant.
+
+These are the resize rules defined for this assembly:
+{rules_json}
+{labels_block}
+The user will describe a resize in natural language referencing a component or dimension.
+
+{size_block}
 HOW TO MATCH THE RULE (only when the user NAMES a specific component):
   1. The user names a component in plain English (e.g. "Right LED power supply").
   2. Use the COMPONENT NAMES map above to find that component's id (e.g. "LPM-24096A-2").
@@ -90,16 +126,27 @@ def rules_system_prompt(
     dim_list: str,
     master_width_dim: str | None = None,
     master_height_dim: str | None = None,
+    is_round: bool = False,
 ) -> str:
     mw = master_width_dim or "null"
     mh = master_height_dim or "null"
+    # On a ROUND product the app has already pinned every dim that drives a circle to the [W]
+    # axis, so [W] means "follows the diameter" and the [H] dims left over are hardware. Python
+    # drops the height axis outright afterwards either way (generate_rules), but saying so here
+    # stops the model spending its grouping effort building a height rule that gets discarded.
+    round_note = ("""
+THIS PRODUCT IS ROUND. It has ONE size: the DIAMETER, carried on the [W] axis.
+  - [W] = follows the DIAMETER. Group these exactly as you would a width.
+  - There is NO height axis. Leave "height" EMPTY ([]). Any [H] dims you see belong to
+    hardware the assembly's mates reposition — never put them in a rule.
+""" if is_round else "")
     return f"""You are a SolidWorks resize rules generator.
 
 The dimension list below is already labeled by the app — trust these labels:
   [W] = controls width
   [H] = controls height
   [?] = internal/fixed — ignore completely
-
+{round_note}
 Your ONLY job:
   - Look at [W] dims — figure out which ones change together
   - Look at [H] dims — figure out which ones change together

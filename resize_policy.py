@@ -92,6 +92,25 @@ LED_STRIP: tuple[str, ...] = ("ZORTECH", "LEDS", "LED STRIP")
 # labeled, and only the profile is pinned.
 LED_CROSS_SECTION_MAX_M = 0.05
 
+# ── Round geometry ───────────────────────────────────────────────────────────
+# How a dim that drives a circle is dimensioned, as PROVEN by the app's nudge rather than read
+# off a name: grow the dim by d and watch the bounding box. A DIAMETER dim moves the outline by
+# d (ratio 1); a RADIUS dim moves it by 2d (ratio 2), because it pushes both sides at once.
+# Live on ECLIPSE 2026-09-11: the mirror, chassis and LED-ring diameters all read 1.00, while
+# 12419-RING's D1@Sketch1 and the LED band's D2@Sketch1/D2@Sketch2 read 2.00.
+RADIAL_DIAMETER = 1
+RADIAL_RADIUS = 2
+
+
+def radial_delta(delta: float, kind: int) -> float:
+    """How far a RADIAL dim moves when the master DIAMETER moves by `delta`.
+
+    A diameter-driven dim tracks the master one-for-one. A radius-driven one drives the outline
+    twice as fast, so it takes HALF -- give it the full delta and the feature grows to double
+    what the mirror did.
+    """
+    return delta / 2.0 if kind == RADIAL_RADIUS else delta
+
 LED_CROSS_SECTION_REASON = (
     "LED strip cross-section (fixed extrusion profile) — only the strip's LENGTH scales, "
     "and it follows whichever axis the strip runs along"
@@ -183,6 +202,24 @@ def _is_kind(dim_name: str, kind: str, patterns: tuple[str, ...],
     return _hits(dim_name, patterns)
 
 
+_WORD_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _word_re(pattern: str) -> "re.Pattern[str]":
+    """`pattern` as whole words inside a normalised component id.
+
+    The neighbours may not be LETTERS. Deliberately looser than `\\b`, which also rejects a
+    digit neighbour and so would stop matching an id written without a separator
+    ("1005-CLIP2" -> "1005 CLIP2"). What has to be refused is the pattern buried inside a longer
+    WORD, which is exactly the ECLIPSE/CLIP collision.
+    """
+    rx = _WORD_RE_CACHE.get(pattern)
+    if rx is None:
+        rx = _WORD_RE_CACHE[pattern] = re.compile(
+            r"(?<![A-Z])" + re.escape(pattern) + r"(?![A-Z])")
+    return rx
+
+
 def _hits(dim_name: str, patterns: tuple[str, ...]) -> bool:
     """Match patterns against the component ID only — NEVER the friendly label.
 
@@ -196,8 +233,15 @@ def _hits(dim_name: str, patterns: tuple[str, ...]) -> bool:
 
     Component IDs are the client's own part numbers: stable, meaningful, verifiable. Use
     `label_suggests_fixed_size` to LOG a label-only match for human review instead.
+
+    Matched as WHOLE WORDS, not as raw substrings. "ECLIPSE" contains "CLIP" -- E-CLIP-SE -- so
+    a plain `in` test classified every part of the round ECLIPSE product as fixed-size clip
+    hardware, `1026-MIRROR-ECLIPSE` included. That made the mirror glass ineligible to be a rule
+    master (fixed-size beats `is_mirror_glass`), so the product could not be resized at all, by
+    any path, with no error to explain why -- the dim was simply reported as blocked.
     """
-    return any(p in _norm(component_of(dim_name)) for p in patterns)
+    text = _norm(component_of(dim_name))
+    return any(_word_re(p).search(text) for p in patterns)
 
 
 def label_suggests_fixed_size(dim_name: str,

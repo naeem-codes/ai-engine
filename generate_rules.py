@@ -121,6 +121,9 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
     log(f"  dimensions        : {len(req.dimensions)} total")
     log(f"  master_width_dim  : {req.master_width_dim or 'null'}")
     log(f"  master_height_dim : {req.master_height_dim or 'null'}")
+    if req.is_round:
+        log(f"  shape             : ROUND — one size axis (the diameter), "
+            f"{len(req.radial_dims)} radial dim(s)")
 
     # Keep dims >= 50 mm (noise filter for unclassified dims), but ALWAYS keep
     # dims the app already labeled [W]/[H] — they are axis drivers regardless of size
@@ -142,6 +145,7 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
             dim_list,
             master_width_dim=req.master_width_dim,
             master_height_dim=req.master_height_dim,
+            is_round=req.is_round,
         ),
         "Generate resize rules for this assembly.",
         # Large assemblies emit big width/height also_change lists. 8192 still truncated
@@ -253,6 +257,26 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
 
     w_master, w_note = policy.pick_master(w_dims, req.master_width_dim, component_labels)
     h_master, h_note = policy.pick_master(h_dims, req.master_height_dim, component_labels)
+
+    # ROUND: one size axis, and it is the diameter on the [W] side. Every radial dim of every
+    # part was pinned to that axis by the app's labeller, so the [H] dims that remain belong to
+    # the hardware — on ECLIPSE they are the hanger's own height and the hanging brackets'. A
+    # height rule built from those would name the hanger as a resize target under a master the
+    # app deliberately sends as null, i.e. a rule that can only ever be wrong.
+    if req.is_round:
+        if h_dims:
+            log(f"  [ROUND] dropping {len(h_dims)} [H] dim(s) — a round mirror has one size "
+                f"axis (the diameter); these are hardware dims, not a height: "
+                f"{', '.join(h_dims)}")
+            for name in h_dims:
+                if name not in {s.name for s in skip}:
+                    skip.append(SkipEntry(
+                        name=name,
+                        reason="round mirror: there is no height axis — the diameter is the "
+                               "only size, and this dim belongs to hardware the mates "
+                               "reposition"))
+        h_dims, h_master = [], None
+
     log(f"  width  master : {w_master or '(none — every dim its own master)'}  [{w_note}]")
     log(f"  height master : {h_master or '(none — every dim its own master)'}  [{h_note}]")
 
@@ -270,7 +294,11 @@ async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:
         return out
 
     width_rules = _rebuild_axis(w_dims, w_master) if w_dims else _scrub(width_rules, "width")
-    height_rules = _rebuild_axis(h_dims, h_master) if h_dims else _scrub(height_rules, "height")
+    # `_scrub` is the no-labels fallback and would hand a round model the LLM's own invented
+    # height rules straight back, undoing the drop above.
+    height_rules = ([] if req.is_round
+                    else _rebuild_axis(h_dims, h_master) if h_dims
+                    else _scrub(height_rules, "height"))
     log(f"  axis-enforced: {len(w_dims)}/{len(w_labeled)} [W] dims, "
         f"{len(h_dims)}/{len(h_labeled)} [H] dims kept after policy")
 

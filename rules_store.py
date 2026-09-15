@@ -84,6 +84,17 @@ def outbox_dir() -> Path:
 # stem (product name AND suffix) identifies the product, so `-LED` and `-LED-HO` never
 # collapse into one family.
 _SIZE_RE = re.compile(r"[-_\s]*\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?[-_\s]*")
+
+# A LONE size token, which is how a ROUND product names itself: one diameter, not a pair.
+# "ECLIPSE-30.00-LED" -> "ECLIPSE-LED". Without this every diameter was its own family, so a
+# round product needed its rules regenerated at each size and lost them on a variant save --
+# the exact failure that keying by family fixed for rectangular products.
+#
+# Requires a DECIMAL POINT, deliberately. A bare integer is far too easy to hit inside a product
+# name, while every round stem the client writes carries two decimals exactly as the WxH stems do
+# ("ECLIPSE-30.00-LED", never "ECLIPSE-30-LED"). Only tried when the WxH pattern did NOT match,
+# so a rectangular stem can never reach it.
+_DIA_RE = re.compile(r"[-_\s]+\d+\.\d+(?=[-_\s]|$)")
 _COPY_RE = re.compile(r"_COPY$", re.IGNORECASE)
 _KEY_RE = re.compile(r"^(?P<family>.+?)(?:#(?P<n>\d+))?$")
 
@@ -104,7 +115,10 @@ def family_from_stem(stem: str) -> str:
     """
     if not stem:
         return ""
-    fam = _SIZE_RE.sub("-", _COPY_RE.sub("", stem))
+    stripped = _COPY_RE.sub("", stem)
+    fam = _SIZE_RE.sub("-", stripped)
+    if fam == stripped:
+        fam = _DIA_RE.sub("-", fam, count=1)
     return re.sub(r"[-_\s]+", "-", fam).strip("-").upper()
 
 
@@ -315,17 +329,34 @@ def select_for_model(model_path: str | None, live_dims=None) -> Selection:
 
     family = family_of(model_path)
     keys = [k for k in candidate_keys(family) if k != stem]
-    scored: list[tuple[float, float, str, dict, Coverage]] = []
+    scored: list[tuple[float, float, float, str, dict, Coverage]] = []
     for key in keys:
         doc = read_key(key)
         if doc is None:
             continue
         cov = coverage(doc, live_dims) if scoring else Coverage()
+        # A missing MASTER used to reject the set outright. It no longer does, because the anchor
+        # is the one part of a rule set the app can always replace: it measures the master off the
+        # model every Refresh. The DEPENDANTS are the hard part, and a set that names them
+        # correctly is worth having whatever its trigger says.
+        #
+        # HALO, live 2026-09-15. The `#2` fork covered 6 of 7 dims and was thrown away because its
+        # trigger still read `HALO-60-MIRROR` after the mirror had become `HALO-70-MIRROR`; the
+        # exact-stem set was kept at **0 of 7**, every dependant evaporated, the mirror shrank
+        # alone and the crossing check refused the resize. Ranked below an anchorable set of equal
+        # coverage, never above it.
         if scoring and not cov.usable:
-            log(f"  [STORE] '{key}' rejected — master dim(s) absent: {', '.join(cov.missing_masters)}")
-            continue
+            # …but only when its DEPENDANTS are actually here. A set with nothing present is not
+            # describing this model at all, anchor or no anchor, and is still refused.
+            if cov.present == 0:
+                log(f"  [STORE] '{key}' rejected — nothing it names exists here "
+                    f"(0/{cov.total} dims, master(s) {', '.join(cov.missing_masters)})")
+                continue
+            log(f"  [STORE] '{key}' names a master this model does not have "
+                f"({', '.join(cov.missing_masters)}) — still a candidate on its dependants "
+                f"({cov.present}/{cov.total}); the anchor is re-derived from the model")
         mtime = _key_path(key).stat().st_mtime
-        scored.append((cov.fraction, mtime, key, doc, cov))
+        scored.append((1.0 if cov.usable else 0.0, cov.fraction, mtime, key, doc, cov))
 
     if not scored:
         if exact is not None:
@@ -337,8 +368,11 @@ def select_for_model(model_path: str | None, live_dims=None) -> Selection:
             f"({len(keys)} candidate(s))")
         return Selection(considered=len(keys))
 
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)   # best coverage, newest breaks ties
-    frac, _mtime, key, doc, cov = scored[0]
+    # Anchorable first, then coverage, then newest. So a set that still names its own master
+    # wins every tie against one that does not, and only better DEPENDANT coverage promotes an
+    # unanchorable fork above it.
+    scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+    _anchorable, frac, _mtime, key, doc, cov = scored[0]
 
     # The exact-stem set wins every TIE, so a sibling has to be strictly better to displace it.
     # Compared on the fraction rather than the raw count deliberately: after a rename a fork

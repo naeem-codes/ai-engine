@@ -264,6 +264,85 @@ runs without a stored set; `tests/test_prompts.py` asserts the prompt stays gone
 
 ---
 
+## ROUND mirrors (the ECLIPSE family)
+
+A round product has **one size axis: the diameter**, and it is carried on the **width** master.
+That is the whole design — every width mechanism (rule selection, constant-offset dependents,
+the mate half-delta follower, the hanger call) then applies unchanged, which is why round support
+is a small change and not a parallel pipeline.
+
+**The app decides the shape, not this side, and it costs nothing.** `TryPerturbDrivenAxis`
+already nudges each dim and measures dx/dy/dz; a dim whose nudge grows **two extents equally**
+is driving a circle. A square bounding box proves nothing — CLARA 36x36 is genuinely square —
+but the delta pattern is exact (live 2026-09-11):
+
+| part | nudge | dx | dy | verdict |
+|---|---|---|---|---|
+| `CLARA-MIRROR D1@Sketch1` | 45.72 | 45.72 | 0.00 | a width |
+| `CLARA-MIRROR D2@Sketch1` | 45.72 | 0.00 | 45.72 | a height |
+| `1026-MIRROR-ECLIPSE D1@Sketch1` | 38.10 | 38.10 | 38.10 | **a diameter** |
+
+The **ratio** then separates the two ways a circle is dimensioned, and it changes the
+arithmetic: nudging a DIAMETER by d grows the outline by d (ratio 1), a RADIUS by d grows it by
+2d (ratio 2), so a radius-driven dependent takes **half** the master delta. ECLIPSE's mirror,
+chassis and LED-ring diameters all read 1.00; `12419-RING`'s `D1@Sketch1` and the LED band read
+2.00. No new SolidWorks call is needed to read a diameter — `SystemValue` already returns it
+(762.00 mm for the Ø30" glass).
+
+`InterpretRequest` / `GenerateRulesRequest` carry `shape` (`"round"`/`"rect"`), `master_radial`
+(1 = the master IS the diameter, 2 = it is a radius, so the target is halved) and `radial_dims`
+(dim → 1/2). All three default to the rectangular behaviour, so an older app is unchanged.
+
+What round changes, and nothing else:
+
+- **`master_height_dim` arrives as None, deliberately.** On a round assembly every `[H]` dim
+  belongs to hardware — the nearest `[H]` dim to ECLIPSE's 762 mm glass is the hanger's own
+  254 mm one — so a height master would aim "change the height to 40" at the hanger.
+  `generate_rules` drops the whole height axis and lists each dropped dim in `skip` with the
+  reason; `_scrub` is bypassed or it would hand the LLM's invented height rules straight back.
+- **`_second_axis_changes` refuses.** "40 x 30" is not a shape this product has; the prompt says
+  so and this is the backstop.
+- **Radius-driven dependents take half the delta** (`policy.radial_delta`). The frame-spanning
+  test compares the **doubled** value, because a real radial frame dim measures ~0.5 of the
+  master diameter — i.e. exactly `MIN_DEPENDENT_FRACTION`, which made the call a coin flip. The
+  small stuff is still correctly excluded: doubled, the RING's 50.80 mm and the band's 49.30 mm
+  are 13% of the glass.
+- **`family_from_stem` strips a lone size token** (`ECLIPSE-30.00-LED` → `ECLIPSE-LED`). The WxH
+  pattern never matched a round stem, so every diameter was its own family — rules regenerated
+  per size and lost on a variant save. Requires a decimal point: a bare integer is far too easy
+  to hit inside a product name.
+- **Hanger geometry** (`select_hanger(round_glass=True)`): area is **pi*d^2/4**, not d^2 (27%
+  smaller, so every prefab's share is 27% larger than the rectangular formula reported), and
+  "fits" becomes a containment test — a w x h hanger lies inside a disc only if its **diagonal**
+  does, `hypot(w, h) <= d`. That is exact and needs no assumption about where on the disc it
+  mounts, which the width-only test does not survive: near the top of a circle the chord is far
+  shorter than the diameter. The same test replaces the chassis width cap, the chassis being a
+  disc too. `interpret` passes the diameter as both extents and `MIN_WIDTH_FRACTION` is applied
+  to the diameter unchanged — **that floor came from the client's landscape rectangles, so
+  whether a round hanger should span 55% of the disc is still a question for them.**
+- **The LED is one continuous ring.** `UpdateLedStrips` is refused for round in the app: growing
+  the diameter grows the circumference by itself, and that routine places extras along X, so on
+  a ring it would stamp duplicate rings in a row. ECLIPSE's ring is `LED FLEX
+  EXTRUSION-ECLIPSE  30.00`, whose `D1@Sketch1` equals the glass master exactly — a zero-offset
+  dependent, one write. Its `D2@Sketch1` (49.30 mm, radial) is the band width and must not move.
+
+**"ECLIPSE" contains "CLIP"** — E-CLIP-SE. `_hits` matched patterns as raw substrings, so every
+part of the round product was classified as fixed-size clip hardware, `1026-MIRROR-ECLIPSE`
+included; fixed-size beats `is_mirror_glass`, so the glass could not be a rule master and the
+product could not be resized by **any** path, with nothing in the output to say why. `_hits` now
+matches whole words (`_word_re`): only a LETTER neighbour disqualifies a match, so an id written
+without a separator still matches. `SolidWorksService.InferPartType` had the identical bug — a
+declared `PartType` is the whole answer to the policy — and carries the mirror-image fix
+(`Word()`); **keep the two in step.**
+
+Tested in `tests/test_round_mirror.py` (22 cases) against the measured ECLIPSE numbers.
+
+**Not yet exercised against live SolidWorks.** Open items: `12419-RING`'s outer diameter (663.40
+mm) matches no dim in the part, so it is probably driven in-context off the chassis — watch it on
+the first real resize; the glass sits at `Configuration: 30.00`, a size-named config that will
+lie after a resize; and LED tape length is `pi*d` (Ø30 → 94.25", Ø40 → 125.66"), a number that
+exists nowhere in the model and is still missing from the SHOP output.
+
 ## Resize invariants (`resize_policy.py`)
 
 These are enforced in code, not prompted, because `generate_rules.py` rebuilds rule membership

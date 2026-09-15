@@ -30,6 +30,7 @@ the AMBER hanger's bounding box is 20.000" wide x 15.000" tall, matching legend 
 "20" X 15"" in that order, so the legend order is the placed orientation.
 """
 
+import math
 from dataclasses import dataclass, field
 
 import resize_policy as policy
@@ -394,7 +395,9 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                   fitted_w_in: float = 0.0,
                   fitted_h_in: float = 0.0,
                   chassis_w_in: float = 0.0,
-                  obstacle_clear_in: float = 0.0) -> HangerChoice:
+                  obstacle_clear_in: float = 0.0,
+                  round_glass: bool = False,
+                  fitted_glass_w_in: float = 0.0) -> HangerChoice:
     """Choose a hanger for a glass panel of `glass_w_in` x `glass_h_in` inches.
 
     `fitted_w_in`/`fitted_h_in` describe the hanger ALREADY in the model. Supplying them
@@ -407,8 +410,27 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     it caps every outcome -- kept, substituted or scaled -- because a hanger wider than its
     chassis overhangs the part carrying its tabs. Omit it (0) and the chassis is not considered,
     which is the old behaviour.
+
+    `round_glass` says the panel is a CIRCLE of diameter `glass_w_in` (the caller passes the
+    diameter as both extents, because the diameter is what it measures on each axis). Two things
+    change, both geometry rather than policy:
+
+      * the AREA is pi*d^2/4, not d^2 — 27% smaller, so every prefab's share of the glass is
+        27% LARGER than the rectangular formula reports. Left uncorrected the 25% ceiling sits
+        too high and the selector reaches for a hanger the client would not use.
+      * "fits" becomes a CONTAINMENT test: a w x h hanger lies inside a circle of diameter d
+        only if its DIAGONAL does, hypot(w, h) <= d. That is exact and needs no assumption about
+        where on the disc the hanger is mounted — which the width-only test does not survive,
+        because near the top of a circle the available chord is far shorter than the diameter,
+        so a hanger passing on width alone can still overhang the arc. The same test replaces
+        the chassis width cap, the chassis being a disc too.
+
+    MIN_WIDTH_FRACTION is applied to the DIAMETER unchanged. That floor was derived from the
+    client's landscape RECTANGLES, so whether a round hanger should span 55% of the disc is a
+    question for them; the containment test keeps every answer physical in the meantime.
     """
-    glass_area = glass_w_in * glass_h_in
+    glass_area = (math.pi * glass_w_in * glass_w_in / 4.0 if round_glass
+                  else glass_w_in * glass_h_in)
     if glass_area <= 0:
         return HangerChoice(part=None, needs_review=True,
                             reason="glass area is zero — cannot select a hanger")
@@ -426,14 +448,24 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     chassis_cap = ((chassis_w_in - CHASSIS_CLEARANCE_IN - 2 * max(obstacle_clear_in, 0.0))
                    if chassis_w_in > 0 else float("inf"))
 
+    def _inside(w: float, h: float, cap_w: float, cap_h: float) -> bool:
+        """Does a w x h hanger lie within a cap_w x cap_h panel (or a cap_w-diameter disc)?"""
+        if round_glass:
+            return math.hypot(w, h) <= cap_w + 1e-9
+        return w <= cap_w + 1e-9 and h <= cap_h + 1e-9
+
+    def _over_cap(w: float, h: float, cap: float) -> bool:
+        """Too big for the chassis it bolts to — its diagonal, when the chassis is a disc."""
+        return (math.hypot(w, h) if round_glass else w) > cap + 1e-9
+
     candidates: list[Candidate] = []
     for part, w, h in PREFAB_HANGERS:
         area = w * h
         frac = area / glass_area
-        fits = w <= max_w + 1e-9 and h <= max_h + 1e-9
+        fits = _inside(w, h, max_w, max_h)
         too_tall = h > height_cap + 1e-9
         too_narrow = w < width_floor - 1e-9
-        over_chassis = w > chassis_cap + 1e-9
+        over_chassis = _over_cap(w, h, chassis_cap)
         candidates.append(Candidate(
             part=part, width_in=w, height_in=h, area_sq_in=area, fraction=frac,
             fits=fits, too_tall=too_tall, too_narrow=too_narrow, over_chassis=over_chassis,
@@ -451,7 +483,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     # swapping a correctly-sized bespoke part for a catalogue one is never an improvement.
     if fitted_w_in > 0 and fitted_h_in > 0:
         fitted_frac = (fitted_w_in * fitted_h_in) / glass_area
-        fitted_fits = (fitted_w_in <= max_w + 1e-9 and fitted_h_in <= max_h + 1e-9
+        fitted_fits = (_inside(fitted_w_in, fitted_h_in, max_w, max_h)
                        and fitted_h_in <= height_cap + 1e-9)
         # Same acceptance window as prefab eligibility, so a fitted hanger is judged by the
         # exact standard a candidate would be — including KELLY's real 18.55%.
@@ -461,7 +493,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         # fitted hanger was a fine share of the glass and was kept, while being wider than the
         # chassis. Checking it only during prefab substitution would never have run.
         if (fitted_fits and fitted_w_in >= width_floor - 1e-9
-                and fitted_w_in <= chassis_cap + 1e-9
+                and not _over_cap(fitted_w_in, fitted_h_in, chassis_cap)
                 and MIN_ACCEPTABLE_FRACTION <= fitted_frac <= MAX_AREA_FRACTION):
             return HangerChoice(
                 part=None, fraction=fitted_frac, in_band=True, keep_fitted=True,
@@ -508,8 +540,30 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
         # 58.5 x 12.5 = 22.6% instead of 58.5 x 21.5 = 38.8%.
         # Capped by the chassis as well as the glass: a scaled hanger is no more allowed to
         # overhang the part carrying its tabs than a catalogue one is.
-        new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w, chassis_cap)
-        new_h = (RESIZE_TARGET_FRACTION * glass_area) / new_w if new_w > 0 else 0.0
+        # A ROUND product keeps the hanger's OWN proportion of the diameter, and does not go
+        # near TARGET_WIDTH_FRACTION. That 65% target and the 55% floor under it were read off
+        # the client's landscape RECTANGLES; ECLIPSE's own drawn hanger is 14.25in on a 30in
+        # disc - 47.5% - so the rectangle rule inflates it by more than a third the moment
+        # anything is resized.
+        #
+        # ⚠ And it does not come back. 30 -> 45 gave 29.25in (65% of 45); 45 -> 30 gave 19.50in
+        # (65% of 30), NOT the 14.25in it started at. The hanging brackets sit in that hanger's
+        # slots, so they rode out with it: 10.80in from centre as drawn, 11.80in after the round
+        # trip, against a 12419-RING at 13.059in - 1.20in of clearance down to 0.19in, and they
+        # touched the ring. Reported live 2026-09-14.
+        #
+        # Holding the drawn proportion makes the round trip EXACT (14.25 -> 21.375 -> 14.25) and
+        # the clearance can then only improve on a grow, because the ring holds a CONSTANT inset
+        # from the rim and therefore travels faster than the hardware does.
+        scaled_round = (round_glass and fitted_glass_w_in > 0
+                        and fitted_w_in > 0 and fitted_h_in > 0)
+        if scaled_round:
+            k = glass_w_in / fitted_glass_w_in
+            new_w, new_h = fitted_w_in * k, fitted_h_in * k
+            new_w = min(new_w, max_w, chassis_cap)
+        else:
+            new_w = min(TARGET_WIDTH_FRACTION * glass_w_in, max_w, chassis_cap)
+            new_h = (RESIZE_TARGET_FRACTION * glass_area) / new_w if new_w > 0 else 0.0
 
         # Two ceilings on the height, both one-directional — the width is never reduced to
         # satisfy them, because the span is the whole point:
@@ -553,11 +607,16 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
             return HangerChoice(
                 part=None, fraction=(new_w * new_h) / glass_area, in_band=True,
                 resize_fitted=True, target_width_in=new_w, target_height_in=new_h,
-                reason=f"no prefab spans {MIN_WIDTH_FRACTION * 100:.0f}% of the "
-                       f"{glass_w_in:g}in glass; the fitted hanger is resized from "
-                       f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in — "
-                       f"{new_w / glass_w_in * 100:.1f}% of the width for the span, height set "
-                       f"to bring it to {(new_w * new_h) / glass_area * 100:.1f}% of the area",
+                reason=(f"round glass: the fitted hanger keeps its own "
+                        f"{fitted_w_in / fitted_glass_w_in * 100:.1f}% of the diameter, so "
+                        f"{fitted_w_in:g}x{fitted_h_in:g}in becomes {new_w:.3f}x{new_h:.3f}in "
+                        f"on the {glass_w_in:g}in disc — the same size it would come back to"
+                        if scaled_round else
+                        f"no prefab spans {MIN_WIDTH_FRACTION * 100:.0f}% of the "
+                        f"{glass_w_in:g}in glass; the fitted hanger is resized from "
+                        f"{fitted_w_in:g}x{fitted_h_in:g}in to {new_w:.3f}x{new_h:.3f}in — "
+                        f"{new_w / glass_w_in * 100:.1f}% of the width for the span, height set "
+                        f"to bring it to {(new_w * new_h) / glass_area * 100:.1f}% of the area"),
                 chassis_w_in=chassis_w_in, candidates=candidates, rejected_oversize=_rejected_oversize(candidates))
 
     # ── 4. Nothing qualifies, and there is no fitted hanger to resize ─────────
@@ -590,5 +649,6 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
 
 
 def select_hanger_meters(glass_w_m: float, glass_h_m: float, **kw) -> HangerChoice:
+    # `round_glass` rides through **kw like every other keyword.
     """Metre-input wrapper — the engine carries dimensions in metres."""
     return select_hanger(glass_w_m * IN_PER_M, glass_h_m * IN_PER_M, **kw)
