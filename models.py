@@ -1,5 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 
+import outline
+
 
 class DimensionIn(BaseModel):
     name: str
@@ -59,6 +61,20 @@ class SlotRowIn(BaseModel):
     part_width_meters: float = 0.0 # the part the row lives on
     component: str = ""
 
+    # ── Where the row actually SITS on the part ─────────────────────────────────
+    # A row near the top of a curved part has far less width available than the part's widest
+    # point, and until these arrived there was no way to ask. All three default to 0, which
+    # `outline` reads as "unknown" and answers with the full width — today's behaviour.
+    #
+    # `outermost_meters` is MEASURED, not derived from the spacing dim. That is deliberate: on
+    # CAPSULE the tab dim `D3@Sketch6` reads 10.000" while the row's own contours put the outer
+    # slot end 6.140" off centre, so the dim's datum is not the one the geometry uses. Moving
+    # the row by a known DELTA is exact whatever the datum, and reconstructing its position from
+    # the dim is not.
+    part_height_meters: float = 0.0
+    row_y_meters: float = 0.0      # row centre, from the part's centre; sign carries nothing
+    outermost_meters: float = 0.0  # centre to the far end of the outermost slot
+
 
 class InterpretRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
@@ -100,9 +116,31 @@ class InterpretRequest(BaseModel):
     master_radial: int = 0
     radial_dims: dict[str, int] = {}
 
+    # ── CURVED mirrors that are not discs (obround, ellipse) ────────────────────
+    # `shape` now also carries "obround" and "ellipse", measured by the app as a part's real area
+    # over its bounding rectangle's (1.000 / 0.847 / 0.785 at 30 x 42 — eight percent apart). The
+    # verdict is taken off the MASTER's own component, i.e. the glass.
+    #
+    # `outline_w/h_meters` is the SHELL the hardware has to stay inside: the chassis, not the
+    # glass. It has to be the chassis. CAPSULE's clip ended up 0.06" from the chassis rim while
+    # still comfortably inside the glass, so a glass-based check would have passed the very
+    # collision that was reported. It is the chassis's CURRENT bounding box; the new one follows
+    # the constant-offset law the rest of the resize uses (shell delta == master delta), not a
+    # ratio — the chassis is glass minus a fixed border, 0.5" on MICHELLE and 2" on CAPSULE.
+    #
+    # 0 means "the app did not send it", which every check reads as "no outline ceiling" and so
+    # behaves exactly as it did before.
+    outline_w_meters: float = 0.0
+    outline_h_meters: float = 0.0
+
     @property
     def is_round(self) -> bool:
         return (self.shape or "").strip().lower() == "round"
+
+    @property
+    def is_curved(self) -> bool:
+        """The outline narrows towards the ends, so "how wide" needs a height to answer."""
+        return outline.is_curved(self.shape)
 
 
 class DimensionChange(BaseModel):

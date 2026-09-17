@@ -2,6 +2,7 @@ import json
 import math
 import chassis_slots
 import hanger_select
+import outline
 import resize_policy as policy
 import rules_store as store
 from hanger_select import select_hanger_meters
@@ -230,10 +231,36 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
             f"each end, so the hanger is capped at "
             f"{chassis_w / 0.0254 - 2 * obstacle_clear_in:.3f}\" not {chassis_w / 0.0254:.3f}\"")
 
+    # A CURVED chassis narrows towards its ends, and the hanging tabs are cut near the top —
+    # so "the hanger fits across the chassis" is not the question. The question is whether the
+    # TAB ROW the hanger drives still lands on material, and the answer is smaller.
+    #
+    # Capping the hanger is the right lever, not capping the tabs. The tabs track the hanger at
+    # a fixed 4.25" inset, so clamping them alone would leave the brackets sitting inboard of
+    # the slots they are supposed to drop into — a part that does not seat, in place of a part
+    # that does not build. Since the two move one-for-one, the hanger's ceiling is simply its
+    # current width plus whatever growth the row has left.
+    #
+    # The slot length grows with the chassis too and the two compound, so the headroom below is
+    # taken with this turn's new slot length already counted — the slot follower runs first, so
+    # it is sitting in `changes` by now.
+    tab_cap_w_in = 0.0
+    tab_row = _tab_row(req)
+    if fitted_w > 0 and _tab_dim_in_row(req, tab_row, fitted_w, model_rules) is not None:
+        span = _row_headroom(req, changes)
+        if span is not None:
+            growth, why = span
+            tab_cap_w_in = max(0.0, (fitted_w + growth) / 0.0254)
+            log(f"  [OUTLINE] {why}")
+            log(f"  [OUTLINE] the tab row may grow {growth / 0.0254:+.3f}\", so the hanger is "
+                f"capped at {tab_cap_w_in:.3f}\" — not the {chassis_w / 0.0254:.3f}\" the "
+                f"chassis measures across its middle")
+
     choice = select_hanger_meters(glass_w, glass_h,
                                   fitted_w_in=fitted_w / 0.0254,
                                   fitted_h_in=fitted_h / 0.0254,
                                   chassis_w_in=chassis_w / 0.0254,
+                                  tab_cap_w_in=tab_cap_w_in,
                                   obstacle_clear_in=obstacle_clear_in,
                                   round_glass=req.is_round,
                                   # The diameter the fitted hanger is on TODAY. A round product
@@ -278,9 +305,33 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         # else from a dimension write, else unchanged.
         new_w = hanger_w if hanger_w else next(
             (c.value_meters for c in out if c.name == w_dim), old_w)
+        # BACKSTOP, not the main defence. `tab_cap_w_in` above is what should keep the tabs on
+        # material, by choosing a hanger whose spacing fits. This catches the paths that reach a
+        # spacing the cap never saw: a STORED LINK writes the rules file's offset outright, and
+        # the drift correction re-asserts the canonical 4.25" inset on a model that had wandered.
+        # Both are right to do that and neither knows about the outline.
+        #
+        # Clamping here does leave the tabs inboard of the hanger's slots, which is its own
+        # problem — so it says so rather than passing silently. A tab row that does not build is
+        # worse than one that does not seat: the first takes the whole resize with it.
+        row_now = _tab_row(req)
+        span = _row_headroom(req, changes)
         for dim, new_val, _cur_inset, applied_in in _hanger_follower_updates(
                 req, old_w, new_w - old_w, model_rules):
-            if abs(new_val - current.get(dim, 0.0)) < 1e-9:
+            # Only the dim that actually drives the measured row, for the reason
+            # `_tab_dim_in_row` documents: on most products the row in hand is the MOUNTING
+            # slots and the tabs are a separate row the app never reported.
+            if span is not None and row_now is not None and _sketch_of(dim) == _sketch_of(row_now.dim):
+                growth, why = span
+                ceiling = current.get(dim, 0.0) + growth
+                if new_val > ceiling:
+                    log(f"  [OUTLINE] {why}")
+                    log(f"  [OUTLINE] tab spacing {dim} held at {ceiling / 0.0254:.3f}\" "
+                        f"instead of {new_val / 0.0254:.3f}\" — the row would have run off the "
+                        f"material. The tabs now sit inboard of the hanger's slots; check the "
+                        f"hanger size for this shape")
+                    new_val = ceiling
+            if new_val <= 0 or abs(new_val - current.get(dim, 0.0)) < 1e-9:
                 continue              # already correct — nothing to write
             out.append(DimensionChange(name=dim, value_meters=new_val))
             sel.follower_dims.append(dim)
@@ -532,7 +583,7 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         log(f"  [MATE] {mate.dim} holds {mate.component} on {mate.axis}: "
             f"{base / 0.0254:.3f}\" → {new_val / 0.0254:.3f}\" ({why})")
         out.append((mate.dim, new_val, base, mate.component))
-    return out
+    return _outline_hold_back(req, changes, out)
 
 
 # How much clear space a positioned part keeps between itself and the rim of a round chassis
@@ -793,6 +844,7 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
     seen: set[str] = set()
     if not req.slot_rows:
         return out
+    tab_row = _tab_row(req)          # None on every rectangle, and on anything unmeasured
 
     for change in changes:
         if (req.dim_axis_labels or {}).get(change.name) != "W":
@@ -834,6 +886,25 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
             if target_in is None:
                 continue
             new_val = target_in * 0.0254
+
+            # `chassis_slots` measures the room across the part's WIDEST point, which on a
+            # curved chassis is not where the row is. Same ceiling as the tab spacing gets, and
+            # the same arithmetic: a symmetric row sends half of any length change to each end,
+            # so the length may grow by exactly the headroom the spacing may. Asked with the
+            # spacing held still, because at this point in the turn it has not moved yet.
+            span = (_row_headroom(req, changes, slot_length_m=row.length_meters)
+                    if tab_row is not None and tab_row.dim == row.dim else None)
+            if span is not None:
+                growth, why = span
+                if new_val > row.length_meters + growth:
+                    log(f"  [OUTLINE] {why}")
+                    log(f"  [OUTLINE]   {row.dim} held to "
+                        f"{(row.length_meters + growth) / 0.0254:.3f}\" rather than "
+                        f"{new_val / 0.0254:.3f}\" — the widest point of the part is not where "
+                        f"this row sits")
+                    new_val = row.length_meters + growth
+            if new_val <= 0:
+                continue
             if abs(new_val - current[row.dim]) < 1e-9:
                 continue
             out.append((row.dim, new_val, current[row.dim]))
@@ -891,6 +962,284 @@ def _resolve_stored_dim(stored: str, live: list[str],
     log(f"  [TAB] stored link {stored} matches no single live dim "
         f"({len(same_head)} share its feature) — falling back to the geometric search")
     return None
+
+
+# ── The curved outline, and the three checks that have to ask it ─────────────────────────────
+#
+# All three exist because of two failures measured live on CAPSULE 20x40 on 2026-09-17, both
+# traceable to the same assumption — see `outline` for the full account. Everything here is
+# gated on the app having sent BOTH a curved shape and a shell size; without either, every
+# function returns "no ceiling" and the rectangular path runs untouched.
+
+
+def _outline_hold_back(req: InterpretRequest, changes: list[DimensionChange],
+                       out: list[tuple[str, float, float, str]],
+                       ) -> list[tuple[str, float, float, str]]:
+    """Pull the positioned hardware back in on W until it clears a CURVED shell.
+
+    Holding a part's distance from the top edge and its distance from the side edge is exactly
+    right on a rectangle, and both were held on CAPSULE 20x40 -> 40x50. The clip still ended up
+    inside `12376-CHASSIS TOP`, because under a curved end the limit is DIAGONAL and neither axis
+    check can see it: the clip moved 5.000" up and 6.875" out, each keeping its own clearance,
+    while its distance from the arc's centre went from 6.86" to 18.94" against a 19.00" rim. Two
+    inches and a fifth of clearance became six hundredths.
+
+    **W only.** The height offset is what holds the part against the top edge, and the client's
+    own drawings keep it; sliding the part down the glass to make room would be inventing a new
+    position rather than correcting an impossible one. Moving it inboard is the correction that
+    matches what the geometry actually ran out of.
+
+    **ONE pull for the whole group**, taken from whichever member needs it most — the lesson
+    `_round_shifts` already carries. This hardware is bolted together: CAPSULE's clip rides on
+    the hanging bracket, and clamping each by its own size moves them by different amounts and
+    pulls the joint apart. The widest part would always come in furthest, purely for being wide.
+
+    Rectangles never reach here, and neither does anything the app has not measured a shell for.
+
+    Neither does a ROUND product, which has its own radial path in `_round_shifts` — one that
+    also knows about the LED channel, which this does not. Two clamps on one part would fight,
+    and the disc's is the better informed of the two.
+
+    ⚠️ **SWITCHED OFF, and left here on purpose.** Run live on CAPSULE 20x40 -> 40x50 it pulled
+    the clip from 10.875" to 10.246" and the clip STILL fouled `12376-CHASSIS TOP`. So the number
+    it computes is not the real limit, and a clamp that moves a part 0.6" without fixing anything
+    is worse than no clamp: it changes the model for no benefit and makes the next diagnosis
+    harder. The app now asks SolidWorks directly, through `ClearMoveInterferences` — real
+    interference volumes, bisected until clear — which needs no theory about the outline at all.
+
+    Kept rather than deleted because the SHAPE measurement behind it is sound and the tab-row
+    ceiling above still uses it. If interference detection ever turns out to be too slow to run
+    on every resize, this is the cheap pre-filter to bring back — but only once something has
+    checked its answer against the model's.
+    """
+    return out
+    if req.is_round or not req.is_curved or not out:   # pragma: no cover - see the note above
+        return out
+    half_w, half_h = _shell_after(req, changes)
+    if half_w <= 0:
+        return out
+
+    by_dim = {m.dim: m for m in req.mate_positions}
+    moved: dict[str, float] = {}          # dim -> the component's NEW distance off centre
+    axes: dict[str, dict[str, float]] = {}
+    size: dict[str, float] = {}
+
+    for dim, new_val, base, comp in out:
+        mate = by_dim.get(dim)
+        if mate is None or abs(mate.direction) < 1e-6 or mate.axis not in ("W", "H"):
+            continue
+        # The inverse of how `new_val` was built: the mate moves its part by
+        # (value change) / direction, `direction` carrying the side and the gearing.
+        off = abs(mate.offset_meters) + (new_val - base) / mate.direction
+        moved[dim] = off
+        axes.setdefault(mate.component, {})[mate.axis] = off
+        size[mate.component] = max(size.get(mate.component, 0.0), mate.extent_meters / 2.0)
+
+    pull, tightest, detail = 1.0, "", ""
+    for comp, ax in axes.items():
+        x, y = ax.get("W"), ax.get("H")
+        if x is None or x <= 0:
+            continue                      # nothing being written on W — nothing to hold back
+        if y is None:
+            # One mate, so the other axis has to come from the radius the app measured, or the
+            # part would be checked as though it sat on the centreline.
+            r = max((m.radius_meters for m in req.mate_positions
+                     if m.component == comp), default=0.0)
+            if r <= abs(x):
+                continue
+            y = math.sqrt(r * r - x * x)
+        allowed = outline.max_x_at(y, half_w, half_h, req.shape, overhang=size.get(comp, 0.0))
+        if allowed < x and x > 0 and allowed / x < pull:
+            pull, tightest = allowed / x, comp
+            detail = (f"{comp} would sit {x / 0.0254:.3f}\" off centre at "
+                      f"{y / 0.0254:.3f}\" up, where a {req.shape} shell "
+                      f"{half_w * 2 / 0.0254:.3f}\" across its middle leaves it "
+                      f"{allowed / 0.0254:.3f}\"")
+    if pull >= 1.0:
+        return out
+
+    log(f"  [OUTLINE] {detail}")
+    log(f"  [OUTLINE] the whole group is held back to {pull:.4f} of its W travel — {tightest} "
+        f"is the part that would have fouled the shell. Held together so the parts bolted to "
+        f"each other still line up; their height offsets are untouched.")
+
+    held: list[tuple[str, float, float, str]] = []
+    for dim, new_val, base, comp in out:
+        mate = by_dim.get(dim)
+        if mate is None or mate.axis != "W" or dim not in moved:
+            held.append((dim, new_val, base, comp))
+            continue
+        want = moved[dim] * pull
+        pulled = base + (want - abs(mate.offset_meters)) * mate.direction
+        floor = _mate_position_floor(mate, {c.name: c.value_meters for c in changes},
+                                     {d.name: d.value_meters for d in req.dimensions}, req)
+        if pulled < floor:
+            pulled = floor                # the no-overlap bound still wins over the shell
+        log(f"  [OUTLINE]   {dim}: {new_val / 0.0254:.3f}\" → {pulled / 0.0254:.3f}\"")
+        held.append((dim, pulled, base, comp))
+    return held
+
+
+def _shell_after(req: InterpretRequest, changes: list[DimensionChange]) -> tuple[float, float]:
+    """The shell's half-width and half-height AFTER this resize, in metres. (0, 0) when unknown.
+
+    The shell is the CHASSIS, and the caller must not substitute the glass for it: CAPSULE's clip
+    finished 0.06" off the chassis rim while still sitting comfortably inside the glass, so the
+    glass would have waved through the collision that was reported.
+
+    It grows by the MASTER'S DELTA, not by the master's ratio. That is the constant-offset law
+    the whole resize already runs on, and it is what the models show — the chassis is the glass
+    minus a fixed border, 0.5" on MICHELLE and 2" on CAPSULE, at every size the client draws.
+    """
+    if req.outline_w_meters <= 0 or req.outline_h_meters <= 0:
+        return 0.0, 0.0
+    applied = {c.name: c.value_meters for c in changes}
+    current = {d.name: d.value_meters for d in req.dimensions}
+
+    def delta(dim: str | None) -> float:
+        if not dim or dim not in applied or dim not in current:
+            return 0.0
+        return applied[dim] - current[dim]
+
+    w = req.outline_w_meters + delta(req.master_width_dim)
+    # A round product has no height master by design and its one size drives both axes.
+    h = req.outline_h_meters + (delta(req.master_width_dim) if req.is_round
+                                else delta(req.master_height_dim))
+    return (w / 2.0, h / 2.0) if w > 0 and h > 0 else (0.0, 0.0)
+
+
+def _tab_row(req: InterpretRequest):
+    """The chassis slot row the hanging tabs sit in, or None when it cannot be placed.
+
+    "Cannot be placed" is the common case on a model the app has not re-measured yet, and it has
+    to stay harmless: every caller treats None as "no outline ceiling".
+
+    A row is only usable if it carries its own position. `row_y_meters` is read out of the
+    sketch, so it is trusted only when it lands INSIDE the part — a sketch whose origin is not
+    the part's centre reports a row that cannot be where it says it is, and a wrong height is
+    worse than no height because it would invent a ceiling nobody asked for.
+
+    With more than one row the highest wins: it is the one closest to the narrowing end, so it
+    is the one that fails first.
+    """
+    best = None
+    for row in req.slot_rows or []:
+        if row.part_width_meters <= 0 or row.part_height_meters <= 0:
+            continue
+        if row.outermost_meters <= 0:
+            continue
+        if abs(row.row_y_meters) >= row.part_height_meters / 2.0:
+            log(f"  [OUTLINE] {row.component} slot row sits {row.row_y_meters / 0.0254:.3f}\" "
+                f"off centre on a {row.part_height_meters / 0.0254:.3f}\" part — the sketch's "
+                f"origin is not the part's centre, so the row's height is not usable here")
+            continue
+        if not policy.is_chassis(row.dim, req.component_types):
+            continue
+        if best is None or abs(row.row_y_meters) > abs(best.row_y_meters):
+            best = row
+    return best
+
+
+def _sketch_of(dim: str) -> str:
+    """`D3@Sketch6 [12375-CHASSIS-1]` -> `SKETCH6 [12375-CHASSIS-1]`. "" when it has no sketch.
+
+    Two dims sharing this are two dims drawn in the same sketch, so they move the SAME contours.
+    That is the whole question a spacing ceiling has to answer before it fires.
+    """
+    at = dim.find("@")
+    return dim[at + 1:].strip().upper() if at >= 0 else ""
+
+
+def _tab_dim_in_row(req: InterpretRequest, row, old_hanger_w: float, model_rules) -> str | None:
+    """The hanging-tab SPACING dim, but only if it drives the slot row `row` measured off.
+
+    The gate matters. `MeasureSlotRows` already refuses to return a row it recognises as a
+    hanging-tab cut, so on most products the row in hand is the MOUNTING slots and the tabs are a
+    separate row the app never reported. Applying a tab ceiling to a row the tabs do not move
+    would clamp the wrong thing for the wrong reason.
+
+    On CAPSULE they ARE the same row: `D2@Sketch6` drives the slot length and `D3@Sketch6` the
+    spacing, both in `Sketch6`, both cut by `Cut-Extrude2` — the feature that failed. Same sketch
+    is exactly the test.
+
+    Identification reuses the follower's own two paths so the two can never disagree about which
+    dim this is: the rules file's stored link first, then "sits 4.25in inside the hanger width".
+    """
+    if row is None:
+        return None
+    want = _sketch_of(row.dim)
+    if not want:
+        return None
+
+    stored = _stored_tab_link(req, model_rules)
+    if stored is not None:
+        return stored[0] if _sketch_of(stored[0]) == want else None
+
+    if old_hanger_w <= 0:
+        return None
+    for d in req.dimensions:
+        if _sketch_of(d.name) != want or d.name == row.dim:
+            continue
+        inset_in = (old_hanger_w - d.value_meters) / 0.0254
+        if abs(inset_in - hanger_select.EXPECTED_TAB_INSET_IN) <= hanger_select.EXPECTED_TAB_INSET_TOL_IN:
+            return d.name
+    return None
+
+
+def _row_headroom(req: InterpretRequest, changes: list[DimensionChange],
+                  slot_length_m: float | None = None) -> tuple[float, str] | None:
+    """How much a slot row may still SPREAD before it runs off the material.
+
+    Returns (metres_of_growth, why) — negative when the row is ALREADY over — or None when there
+    is no ceiling to apply, which is every rectangular product and any model the app has not
+    re-measured.
+
+    The row's outer end is tracked by DELTA, never rebuilt from the spacing dim. On CAPSULE that
+    dim reads 10.000" while the row's own contours put the outer slot end 6.140" off centre, so
+    its datum is not the geometry's. Moving a symmetric row by a known change is exact whatever
+    the datum is; reconstructing where it starts from is not.
+
+        outer_end(spacing) = outer_end_now + (spacing - spacing_now)/2 + (length - length_now)/2
+
+    Both terms are halved because the row is symmetric about the centre, so each end takes half
+    of whatever the pair does.
+
+    The two moves COMPOUND, and checking either on its own lets the pair through: on the CAPSULE
+    resize that aborted, the spacing accounted for 2.875" of the overrun and the lengthening slot
+    for a further 1.094". So the slot length is picked up from `changes` by default — the slot
+    follower runs before both callers, so by the time either asks, the new length is already
+    there. Pass `slot_length_m` only to override that, which the slot follower itself does when
+    it is still deciding what the length should be.
+
+    ROUND is deliberately left out. A disc narrows towards its top just as an obround does, so
+    the same ceiling would apply and probably should — but round products build correctly today
+    and this change was not made for them. Widening it is a separate, testable step.
+    """
+    if req.is_round or not req.is_curved:
+        return None
+    half_w, half_h = _shell_after(req, changes)
+    if half_w <= 0:
+        return None
+    row = _tab_row(req)
+    if row is None:
+        return None
+
+    allowed = outline.max_x_at(row.row_y_meters, half_w, half_h, req.shape)
+    if allowed <= 0:
+        return None
+    if slot_length_m is None:
+        slot_length_m = next((c.value_meters for c in changes if c.name == row.dim),
+                             row.length_meters)
+    grow = (slot_length_m - row.length_meters) / 2.0
+    headroom = allowed - row.outermost_meters - grow
+    across = outline.half_width_at(row.row_y_meters, half_w, half_h, req.shape) * 2
+    why = (f"{row.row_y_meters / 0.0254:.3f}\" up a {req.shape} shell "
+           f"{half_w * 2 / 0.0254:.3f}\" across its middle, the part is only "
+           f"{across / 0.0254:.3f}\" wide, so the outer slot end cannot pass "
+           f"{allowed / 0.0254:.3f}\" (it is at {row.outermost_meters / 0.0254:.3f}\" now"
+           + (f", and the slot is lengthening by {grow * 2 / 0.0254:.3f}\"" if abs(grow) > 1e-9
+              else "") + ")")
+    return headroom * 2.0, why
 
 
 def _stored_tab_link(req: InterpretRequest, model_rules) -> tuple[str, float] | None:

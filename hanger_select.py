@@ -395,6 +395,7 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                   fitted_w_in: float = 0.0,
                   fitted_h_in: float = 0.0,
                   chassis_w_in: float = 0.0,
+                  tab_cap_w_in: float = 0.0,
                   obstacle_clear_in: float = 0.0,
                   round_glass: bool = False,
                   fitted_glass_w_in: float = 0.0) -> HangerChoice:
@@ -410,6 +411,15 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     it caps every outcome -- kept, substituted or scaled -- because a hanger wider than its
     chassis overhangs the part carrying its tabs. Omit it (0) and the chassis is not considered,
     which is the old behaviour.
+
+    `tab_cap_w_in` is the same idea one step further in, and it exists because the chassis width
+    is measured across the MIDDLE of the part while the hanging tabs are cut near the TOP. On a
+    rectangle those are the same number. On CAPSULE's obround chassis they are not: the 20in
+    #1038 passed the 28in chassis cap comfortably, its tabs went to 15.750in as they must, and
+    the slot's outer end landed 1.17in off the sheet -- `Cut-Extrude2` failed and the resize
+    rolled back (measured live 2026-09-17). The caller works out how far the tab row can still
+    travel on the real outline and passes the hanger width that implies; 0 means no such limit,
+    which is every rectangular product.
 
     `round_glass` says the panel is a CIRCLE of diameter `glass_w_in` (the caller passes the
     diameter as both extents, because the diameter is what it measures on each axis). Two things
@@ -447,6 +457,11 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     # without touching any of them.
     chassis_cap = ((chassis_w_in - CHASSIS_CLEARANCE_IN - 2 * max(obstacle_clear_in, 0.0))
                    if chassis_w_in > 0 else float("inf"))
+    # Folded into the SAME number rather than carried alongside, for the reason the obstacle band
+    # is: every outcome -- kept, substituted, custom -- already honours `chassis_cap`, so one
+    # min() reaches all three without touching any of them.
+    if tab_cap_w_in > 0:
+        chassis_cap = min(chassis_cap, tab_cap_w_in)
 
     def _inside(w: float, h: float, cap_w: float, cap_h: float) -> bool:
         """Does a w x h hanger lie within a cap_w x cap_h panel (or a cap_w-diameter disc)?"""
