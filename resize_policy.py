@@ -263,6 +263,29 @@ def label_suggests_fixed_size(dim_name: str,
     return None
 
 
+# ── Drilling templates ───────────────────────────────────────────────────────
+# A HANGER TEMPLATE is the plate a fabricator drills through to mark the hanger's hole
+# pattern on the chassis. It is named after the hanger because that is the pattern it
+# carries -- it is not a hanger, it has no slots, and nothing hangs from it. It spans the
+# glass, so it has to grow with the glass: on LUCY 48 both templates' `D1@Sketch1` equal
+# the mirror diameter to the thousandth.
+#
+# Safe because the two sets do not overlap, measured over every model on this machine:
+#
+#     45 hanger files, all "<number>-HANGER" (plus HANGER-EXTRA)   none contains TEMPLATE
+#      7 template files, all containing TEMPLATE                   none is a "<number>-HANGER"
+#
+# A PartType declaration still wins in both directions, so a part that really is a hanger
+# can say so and be frozen. The app's `InferPartType` deliberately refuses to STAMP HANGER
+# on a template, since a declaration written to disk would undo this exception permanently.
+TEMPLATE: tuple[str, ...] = ("TEMPLATE",)
+
+
+def is_template(dim_name: str, types: dict[str, str] | None = None) -> bool:
+    """True if this component is a drilling template rather than the part it is named for."""
+    return not declared_type(dim_name, types) and _hits(dim_name, TEMPLATE)
+
+
 def fixed_size_reason(dim_name: str,
                       component_labels: dict[str, str] | None = None,
                       types: dict[str, str] | None = None) -> str | None:
@@ -275,9 +298,17 @@ def fixed_size_reason(dim_name: str,
             if _KIND_TO_TYPE.get(kind) == d:
                 return reason
         return None
-    for _kind, patterns, reason in FIXED_SIZE:
-        if _hits(dim_name, patterns):
-            return reason
+    for kind, patterns, reason in FIXED_SIZE:
+        if not _hits(dim_name, patterns):
+            continue
+        # The prefab freeze is right and stays -- a hanger is SELECTED from the legend, never
+        # scaled, and ratio-scaling one took a 15.000" hanger to 20.000" on 2026-07-30. It
+        # simply does not reach a part that merely has the word in its name. Scoped to this
+        # ONE entry: no clip, bracket or power-supply template exists in any model here, so
+        # widening it would be a guess rather than a measurement.
+        if kind == "hanger" and is_template(dim_name, types):
+            continue
+        return reason
     return None
 
 
@@ -349,6 +380,13 @@ def is_hanger(dim_name: str,
     it is re-selected from the prefab matrix by glass area and then written to that prefab's
     exact catalogue dims. `interpret._hanger_changes` uses this to find the dims to write.
     """
+    # Live 2026-09-21, LUCY 48 -> 60: `hanger_dim()` takes the LARGEST hanger-labelled dim,
+    # and LUCY's two 48.000" templates beat the real 25.250" `12446-HANGER`. The tie between
+    # the two templates fell to the dim NAME, so "TEMPLATE-B" was stretched to 59.500" (its
+    # Sketch3 failed with swSketchErrorExtRefFail and an offset-edge relation was suppressed
+    # to save it), "TEMPLATE" was left at 48.000", and the hanger itself never moved at all.
+    if is_template(dim_name, types):
+        return False
     return _is_kind(dim_name, "HANGER", ("HANGER",), types)
 
 
