@@ -90,6 +90,117 @@ GEN_TAB_INSET_TOL_IN = 0.25
 # measured value is kept (and logged), because a stored link is per-product by construction.
 GEN_TAB_SNAP_IN = 0.01
 
+# ── Identifying the tab row when the INSET is not canonical ──────────────────────────────
+#
+# Everything above identifies the tab spacing by "it sits 4.25in inside the hanger width". That
+# is a property of the HANGER, not of the chassis, and it only holds while the fitted hanger is
+# one of the prefabs. AMY's is not: its hangers are custom parts whose slots sit 4.750in in from
+# each edge at every size the client built (12214/12217/12220/12223, 23/35/47/59in wide, read
+# off their flat-pattern DXFs), so the tab row is 9.500in inside the hanger and invisible to the
+# 4.25 +/- 0.25 window. Live 2026-09-25, AMY 24x48 -> 44x68: the hanger was stretched 23.000 ->
+# 28.500in, its slots moved out 2.750in a side WITH ITS EDGE (measured in the assembly: 7.750 to
+# 9.500in off centre), and the chassis notches and tabs stayed at 5.000 to 6.750in —
+# `follower_dims: []`, `offsetRules=0`, no link was ever stored.
+#
+# The row can still be found, by STRUCTURE rather than by a magic distance. A hanging tab is cut
+# to fit the hanger's slot, and the slot is 1.750in long on every hanger in every log on this
+# machine - 12214/12217 (AMY), 1215, 1038, 12456 and 12469, across three product families. The
+# chassis sketch that draws the tab row carries that same 1.750in, and the row's SPACING is the
+# largest dim in it:
+#
+#     AMY      12213-CHASSIS  Sketch53   13.500, 1.750, 0.500     -> 13.500in   (24x48)
+#     AMY      12216-CHASSIS  Sketch53   25.500, 1.750, 0.500     -> 25.500in   (36x36)
+#     AMBER    1111-CHASSIS   Sketch81   15.750, 1.750, 0.728     -> 15.750in
+#
+# A slot LENGTH is also a better thing to pin than an inset: it is the tab stock the client cuts
+# to, whereas the inset differs per hanger by construction - which is the whole reason this path
+# exists.
+HANGER_SLOT_LENGTH_IN = 1.750
+HANGER_SLOT_LENGTH_TOL_IN = 0.002   # a modelled 1.750 is exact; this is float noise only
+
+# The row spacing has to be a SPAN, not another feature dim that happens to share the sketch.
+# The known rows are 7.7x (AMY 24x48) to 14.6x the slot length.
+MIN_TAB_SPAN_OVER_SLOT = 3.0
+
+# ── The rest of the tab STACK: a tab positioned by its own dimension ──────────────────────
+#
+# On AMY the row sketch (`Sketch53`, consumed by `Cut-Extrude7`) cuts the NOTCHES the tabs sit
+# in, and the tabs themselves are a separate boss (`Boss-Extrude2` on `Sketch35`). How that boss
+# is placed differs between the client's own parts, and that difference is the whole bug:
+#
+#   * AMY 36x36 (`12216-CHASSIS`): `Sketch35` carries 1.625 x 0.375 x 0.0625in and nothing
+#     else - an outline tied by relations to the notch. It follows the row for free, which is
+#     why the row link alone fixed it (live 2026-09-21, hanger swapped to prefab #1215).
+#   * AMY 24x48 (`12213-CHASSIS`): `Sketch35` carries its OWN spacing, `D1@Sketch35` = 10.125in
+#     between the tabs' inner edges (1/16in inside the 10.000in notch edges, both symmetric about
+#     the centreline). Writing only the row moved the notches out from under tabs that stayed
+#     put - "the chassis tab on 74 x 98 is not inside the hanger slot".
+#
+# So every dimensioned member of the stack needs its own link. A member is recognised by two
+# independent facts, both required:
+#   1. it carries a TAB WIDTH that seats in the slot: narrower than the 1.750in slot by a
+#      clearance of at most `MAX_TAB_CLEARANCE_IN` in total (AMY: 1.625in, 0.125in total). A
+#      chassis is full of small feature dims; one that is just under the slot length is not an
+#      accident. The nearest non-tab dim on AMY 24x48 is `D6@Sketch54` at 1.500in, outside it.
+#   2. its largest dim is a SPAN lying inside the row's footprint - between the row's inner
+#      edges (row - 2 x slot) and one slot beyond it (which also covers a row dimensioned to the
+#      slot CENTRES rather than their outer ends). AMY: 10.125in in [10.000, 15.250]in.
+# A sketch that passes (1) but has no span of its own is placed by relations and is left alone,
+# with a log line saying so.
+MAX_TAB_CLEARANCE_IN = 0.1875
+TAB_FOOTPRINT_TOL_IN = 0.01
+
+# ── Where each hanger's slots ARE, relative to its edge ───────────────────────────────────
+#
+# Every hanger here draws its slots in `Sketch3` and dimensions the slot's OUTER END from the
+# hanger's side edge with `D2@Sketch3`. Measured 2026-09-25 by opening each catalogue part
+# (read-only) and reading the 1.750in slot faces off the solid, against the value of that dim:
+#
+#     part   width    slots (right half)   outer end from edge   inner span   D2@Sketch3
+#     1004   14.25     5.000 ..  6.750          0.375             10.000        0.375
+#     1038   20.00     7.875 ..  9.625          0.375             15.750        0.375
+#     1119   14.25     5.000 ..  6.750          0.375             10.000        0.375   (live, in AMY)
+#     1169   12.00     3.875 ..  5.625          0.375              7.750        0.375
+#     1215   40.00    17.870 .. 19.620          0.380             35.740        0.380
+#     1333   14.25     5.000 ..  6.750          0.375             10.000        0.375
+#     1417   12.00     3.875 ..  5.625          0.375              7.750        0.375
+#     12214  23->28.5  7.750 ..  9.500 (28.5)   4.750             —             4.750   (AMY's own)
+#
+# So the "canonical 4.25in" above is not a property of the tabs at all: it is the INNER span of a
+# catalogue hanger's slots, 2 x (0.375 + 1.750). AMBER/KELLY dimension their tab row to that inner
+# span; AMY dimensions its notch row (`D2@Sketch53`) to the OUTER span, so on a prefab its row sits
+# 2 x 0.375 = 0.750in inside the hanger, not 4.250in. Assuming the canonical number for AMY put the
+# row at 10.000in on a swapped-in #1119 whose slots need 13.500in (live 2026-09-25, 74x98 -> 24x48).
+#
+# The general law, and the one the tab stack now follows: a tab-stack dim keeps its position
+# RELATIVE TO THE SLOTS of whichever hanger is fitted. The slots' outer span is
+# `hanger width - 2 x slot edge inset`; the row is that span, or the span less one or two slot
+# lengths (centre-to-centre, inner edges). The inset of the fitted hanger is read off the model;
+# for a prefab about to be swapped in it comes from this table.
+PREFAB_SLOT_EDGE_INSET_IN: dict[str, float] = {"1215": 0.380}
+DEFAULT_PREFAB_SLOT_EDGE_INSET_IN = 0.375
+SLOT_DATUM_TOL_IN = 0.02
+
+
+def prefab_slot_edge_inset_in(part: str | None) -> float:
+    """How far in from its edge a catalogue hanger's slot outer end sits, in inches."""
+    return PREFAB_SLOT_EDGE_INSET_IN.get((part or "").strip(), DEFAULT_PREFAB_SLOT_EDGE_INSET_IN)
+
+
+def slot_datum(row_inset_in: float, slot_insets_in: list[float]) -> tuple[float, float] | None:
+    """How a tab row relates to the hanger's slots, as (slot_outer_inset_in, datum_in), or None.
+
+    `slot_insets_in` are candidate TOTAL outer-span insets (2 x slot edge inset) from
+    `hanger_slot_row_insets`. The row sits `datum` further in than the slots' outer ends: 0 for a
+    row dimensioned to the outer ends (AMY), one slot length for centre-to-centre, two for the
+    inner ends (AMBER/KELLY). The outer-end datum is preferred when several fit.
+    """
+    for datum in (0.0, HANGER_SLOT_LENGTH_IN, 2 * HANGER_SLOT_LENGTH_IN):
+        for c in slot_insets_in:
+            if abs(row_inset_in - c - datum) <= SLOT_DATUM_TOL_IN:
+                return c, datum
+    return None
+
 
 @dataclass(frozen=True)
 class TabCandidate:
@@ -99,6 +210,7 @@ class TabCandidate:
     inset_in: float          # hanger width - this dim, in inches
     named: bool              # its feature matches HANGER_FOLLOWER_HINTS
     labelled_w: bool
+    by_slot_row: bool = False   # found by the slot-length structure, not by the inset window
 
 
 def find_tab_spacing_candidates(
@@ -158,6 +270,171 @@ def find_tab_spacing_candidates(
             cands = labelled
     cands.sort(key=lambda c: abs(c.inset_in - EXPECTED_TAB_INSET_IN))
     return cands
+
+
+def sketch_key(dim_name: str) -> str:
+    """`D2@Sketch53 [12216-CHASSIS-1]` -> `SKETCH53 [12216-CHASSIS-1]`.
+
+    Keyed WITH the component so two instances of different chassis parts never merge into one
+    row. Two dims sharing this are drawn in the same sketch.
+    """
+    at = dim_name.find("@")
+    return (dim_name[at + 1:] if at >= 0 else dim_name).strip().upper()
+
+
+def _is_hole_dim(dim_name: str) -> bool:
+    """Hole Wizard dims (`Thru Tap Drill Dia.@Sketch46`, `D2@Hole Thread16`) are never a tab."""
+    upper = dim_name.upper()
+    return "HOLE" in upper or "TAP DRILL" in upper
+
+
+def _chassis_sketches(dim_values: dict[str, float],
+                      types: dict[str, str] | None) -> dict[str, dict[str, float]]:
+    """Every chassis dim that could belong to the tab stack, grouped by sketch."""
+    rows: dict[str, dict[str, float]] = {}
+    for name, value in dim_values.items():
+        if value <= 0:
+            continue
+        if not policy.is_chassis(name, types):
+            continue
+        if policy.is_hanger(name, None, types) or policy.is_mate_dim(name):
+            continue
+        if _is_hole_dim(name):
+            continue
+        rows.setdefault(sketch_key(name), {})[name] = value
+    return rows
+
+
+def _collapse_instances(cands: list[TabCandidate]) -> list[TabCandidate]:
+    """Two INSTANCES of the same chassis file are ONE physical dim, not an ambiguity.
+
+    They carry the same part-local name and the same value, and `interpret._resolve_stored_dim`
+    maps a stored link onto whichever instance is live. Without this a product with a mirrored
+    pair of chassis parts would be called ambiguous and get no link at all.
+    """
+    collapsed: dict[tuple[str, float], TabCandidate] = {}
+    for c in cands:
+        collapsed.setdefault((c.dim.split(" [")[0], round(c.value_meters, 9)), c)
+    return list(collapsed.values())
+
+
+def find_tab_spacing_by_slot_row(
+    dim_values: dict[str, float],
+    hanger_w_m: float,
+    types: dict[str, str] | None = None,
+) -> list[TabCandidate]:
+    """The tab row found by the slot length it is cut to, for a non-canonical inset.
+
+    See `HANGER_SLOT_LENGTH_IN` for the measurements. Same contract as
+    `find_tab_spacing_candidates`: more than one result means the model is ambiguous and the
+    caller must not guess.
+    """
+    if hanger_w_m <= 0:
+        return []
+    slot_m = HANGER_SLOT_LENGTH_IN * 0.0254
+    tol_m = HANGER_SLOT_LENGTH_TOL_IN * 0.0254
+    out: list[TabCandidate] = []
+    for _sketch, dims in _chassis_sketches(dim_values, types).items():
+        if not any(abs(v - slot_m) <= tol_m for v in dims.values()):
+            continue
+        name, value = max(dims.items(), key=lambda kv: kv[1])
+        if value >= hanger_w_m:
+            continue                       # a span wider than the hanger cannot be its tab row
+        if value < slot_m * MIN_TAB_SPAN_OVER_SLOT:
+            continue                       # the sketch has no span in it, only feature sizes
+        out.append(TabCandidate(
+            dim=name,
+            value_meters=value,
+            inset_in=(hanger_w_m - value) / 0.0254,
+            named=any(h in name.upper() for h in HANGER_FOLLOWER_HINTS),
+            labelled_w=False,
+            by_slot_row=True,
+        ))
+    return _collapse_instances(out)
+
+
+@dataclass(frozen=True)
+class TabStackScan:
+    """What `find_tab_stack_members` found beside a tab row."""
+    members: list[TabCandidate]
+    # Sketches that carry a tab width but no span of their own: placed by relations, so no
+    # dimension write can move them (and none is needed if the relation is to the row).
+    relation_placed: list[str]
+
+
+def find_tab_stack_members(
+    dim_values: dict[str, float],
+    row: TabCandidate,
+    hanger_w_m: float,
+    types: dict[str, str] | None = None,
+) -> TabStackScan:
+    """The other chassis features that sit in the same slots as `row` and carry their own span.
+
+    See `MAX_TAB_CLEARANCE_IN` for why each of the two tests is there. Only the row's own
+    component is searched: the stack is one part, and a same-numbered sketch on another chassis
+    is a different feature.
+    """
+    slot_in = HANGER_SLOT_LENGTH_IN
+    row_in = row.value_meters / 0.0254
+    lo_in = row_in - 2 * slot_in - TAB_FOOTPRINT_TOL_IN
+    hi_in = row_in + slot_in + TAB_FOOTPRINT_TOL_IN
+    row_sketch = sketch_key(row.dim)
+    row_comp = policy.component_of(row.dim)
+
+    members: list[TabCandidate] = []
+    relation_placed: list[str] = []
+    for sketch, dims in _chassis_sketches(dim_values, types).items():
+        if sketch == row_sketch:
+            continue
+        if policy.component_of(next(iter(dims))) != row_comp:
+            continue
+        tab_widths = [v / 0.0254 for v in dims.values()
+                      if slot_in - MAX_TAB_CLEARANCE_IN <= v / 0.0254 < slot_in - 1e-4]
+        if not tab_widths:
+            continue
+        name, value = max(dims.items(), key=lambda kv: kv[1])
+        span_in = value / 0.0254
+        if span_in < slot_in * MIN_TAB_SPAN_OVER_SLOT:
+            relation_placed.append(sketch)
+            continue
+        if not lo_in <= span_in <= hi_in:
+            continue                       # a span somewhere else on the chassis
+        members.append(TabCandidate(
+            dim=name,
+            value_meters=value,
+            inset_in=(hanger_w_m - value) / 0.0254,
+            named=False,
+            labelled_w=False,
+            by_slot_row=True,
+        ))
+    return TabStackScan(members=_collapse_instances(members), relation_placed=relation_placed)
+
+
+def hanger_slot_row_insets(dim_values: dict[str, float],
+                           types: dict[str, str] | None = None) -> list[float]:
+    """What the HANGER's own slot sketch says the tab row's inset should be, in inches.
+
+    The hanger sketch that draws the slots carries the same 1.750in length; its other dims are
+    the slot's width and its position. On AMY's 12214-HANGER that is `Sketch3` = 1.750, 0.156 and
+    4.750in, and 2 x 4.750 = 9.500in is exactly the chassis row's inset. Twice every dim at least
+    a quarter inch is returned, so the caller can check the row against the one that fits.
+
+    Empty when the hanger's slots carry no position dim — the prefabs place theirs by sketch
+    relations — in which case there is nothing to check against, not a failure.
+    """
+    slot_m = HANGER_SLOT_LENGTH_IN * 0.0254
+    tol_m = HANGER_SLOT_LENGTH_TOL_IN * 0.0254
+    sketches: dict[str, dict[str, float]] = {}
+    for name, value in dim_values.items():
+        if value > 0 and policy.is_hanger(name, None, types):
+            sketches.setdefault(sketch_key(name), {})[name] = value
+    out: list[float] = []
+    for dims in sketches.values():
+        if not any(abs(v - slot_m) <= tol_m for v in dims.values()):
+            continue
+        out.extend(2 * v / 0.0254 for v in dims.values()
+                   if abs(v - slot_m) > tol_m and v >= 0.25 * 0.0254)
+    return out
 
 TARGET_AREA_FRACTION = 0.20   # "roughly 20%" — soft target; under it is flagged, not rejected
 MAX_AREA_FRACTION = 0.25      # the binding ceiling: never exceed 25% if anything fits under it

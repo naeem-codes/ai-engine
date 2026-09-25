@@ -56,8 +56,10 @@ def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> lis
     it, and becomes something a resize CORRECTS instead of something that silently switches the
     follower off.
 
-    Returns at most one rule. Ambiguity records a `skip` entry and writes nothing, so the rules
-    UI shows why the link is absent instead of looking like the generator forgot it.
+    Returns the ROW link first, then one link per dimensioned member of the tab stack (see
+    `_tab_stack_links`). The order matters: `interpret._clip_tab_alignment` reads the first
+    follower as the tab spacing. Ambiguity records a `skip` entry and writes nothing, so the
+    rules UI shows why the link is absent instead of looking like the generator forgot it.
     """
     hanger_dim, hanger_w = _hanger_width_dim(req)
     if hanger_w <= 0:
@@ -68,28 +70,47 @@ def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> lis
         dim_values, req.dim_axis_labels, hanger_w)
 
     if not cands:
+        # The inset window only answers while the FITTED hanger is a prefab. AMY's is custom,
+        # with its slots 4.750in in from each edge, so its tab row is 9.500in inside the hanger
+        # and invisible to that window. Fall back to the slot-length structure, which does not
+        # care what the fitted hanger's inset happens to be.
         log(f"  [TAB] no chassis dim sits {hanger_select.EXPECTED_TAB_INSET_IN:.2f}"
             f"+/-{hanger_select.GEN_TAB_INSET_TOL_IN:.2f}in inside the "
-            f"{hanger_w / 0.0254:.3f}in hanger -- this product has no tab spacing to link "
-            f"(a hanging-BRACKET product is expected to land here)")
+            f"{hanger_w / 0.0254:.3f}in hanger -- looking for the tab row by the "
+            f"{hanger_select.HANGER_SLOT_LENGTH_IN:.3f}in slot it is cut to instead")
+        cands = hanger_select.find_tab_spacing_by_slot_row(dim_values, hanger_w)
+
+    if not cands:
+        log("  [TAB] no tab row found either way -- this product has no tab spacing to link "
+            "(a hanging-BRACKET product is expected to land here)")
         return []
 
     if len(cands) > 1:
         detail = ", ".join(f"{c.dim} ({c.inset_in:.3f}in)" for c in cands)
-        log(f"  [TAB] AMBIGUOUS -- {len(cands)} dims sit the right distance inside the hanger "
-            f"and nothing separates them: {detail}. No link stored; the resize-time follower "
-            f"keeps its own name-gated search for this product.")
+        what = (f"chassis sketches carry the {hanger_select.HANGER_SLOT_LENGTH_IN:.3f}in slot "
+                f"length with a span in them" if cands[0].by_slot_row else
+                f"dims sit {hanger_select.EXPECTED_TAB_INSET_IN:.2f}in inside the hanger")
+        log(f"  [TAB] AMBIGUOUS -- {len(cands)} {what} and nothing separates them: {detail}. "
+            f"No link stored; the resize-time follower keeps its own name-gated search for "
+            f"this product.")
         skip.append(SkipEntry(
             name=cands[0].dim,
-            reason=(f"hanging-tab link NOT stored: {len(cands)} dims sit "
-                    f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}in inside the hanger and are "
+            reason=(f"hanging-tab link NOT stored: {len(cands)} {what} and are "
                     f"indistinguishable ({detail}). Confirm which is the tab spacing in "
                     f"SolidWorks.")))
         return []
 
     best = cands[0]
     # Snap a near-canonical inset so modelling noise is not baked into the product forever, but
-    # keep a genuinely different one: the link is per-product, so it is allowed to differ.
+    # keep a genuinely different one: the link records what THIS product's hanger actually has.
+    #
+    # It must not be overridden with the canonical 4.25in here, however tempting. The inset is a
+    # property of the FITTED HANGER, and the link is read on every resize -- including the ones
+    # that KEEP that hanger. Overriding it was tried on 2026-09-21 and broke a correct model:
+    # AMY 24x48 -> 34x58 keeps its bespoke 23.000in `12214-HANGER`, whose slots give a 13.500in
+    # tab row, and the stored 4.250in moved the row to 18.750in -- lifting the tabs out of slots
+    # that had not moved at all. Whether the canonical inset applies is a RESIZE-time question,
+    # because only the resize knows if a prefab is being fitted; `interpret` decides it.
     drift = abs(best.inset_in - hanger_select.EXPECTED_TAB_INSET_IN)
     if drift <= hanger_select.GEN_TAB_SNAP_IN:
         inset_in = hanger_select.EXPECTED_TAB_INSET_IN
@@ -97,7 +118,9 @@ def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> lis
         inset_in = best.inset_in
         log(f"  [TAB] inset {inset_in:.3f}in differs from the canonical "
             f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}in by {drift:.3f}in -- storing the "
-            f"MEASURED value, since this link is derived per product")
+            f"MEASURED value, since this link is derived per product. A resize that SWAPS IN a "
+            f"prefab will use the prefab's canonical inset instead; one that keeps or stretches "
+            f"this hanger keeps this value")
 
     # offset is target - source, so the follower writes `new_hanger_width + offset`. Negative
     # because the tabs sit INSIDE the hanger.
@@ -105,7 +128,7 @@ def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> lis
     log(f"  [TAB] linked {best.dim} -> {hanger_dim}: tabs {best.value_meters / 0.0254:.3f}in sit "
         f"{inset_in:.3f}in inside the {hanger_w / 0.0254:.3f}in hanger"
         + ("" if best.named else " (identified by relationship -- no name hint matched)"))
-    return [OffsetRule(
+    rules = [OffsetRule(
         component=policy.component_of(best.dim),
         target_dim=best.dim,
         source_dim=hanger_dim,
@@ -114,6 +137,80 @@ def _tab_spacing_offset(req: GenerateRulesRequest, skip: list[SkipEntry]) -> lis
               f"width. Derived from the aligned model ({best.value_meters / 0.0254:.3f}in tabs "
               f"in a {hanger_w / 0.0254:.3f}in hanger) so no resize has to re-guess it."),
     )]
+
+    # Only on the slot-row path. The inset-window products (AMBER, KELLY, PIAZZA, BREAM) are
+    # verified live with the row alone, and their tabs are cut in the row's own sketch; searching
+    # them for extra members would add writes nobody has checked.
+    if best.by_slot_row:
+        _check_row_against_hanger_slots(dim_values, best, inset_in, skip)
+        rules += _tab_stack_links(dim_values, best, hanger_dim, hanger_w)
+    return rules
+
+
+def _tab_stack_links(dim_values: dict[str, float], row, hanger_dim: str,
+                     hanger_w: float) -> list[OffsetRule]:
+    """One link per chassis feature that sits in the row's slots AND carries its own span.
+
+    Live 2026-09-21 and again 2026-09-25, AMY: the row link moved the notches (`Cut-Extrude7`,
+    `D2@Sketch53`) onto the hanger's slots, but on the 24x48 chassis the tabs themselves
+    (`Boss-Extrude2`, `D1@Sketch35` = 10.125in) have their own spacing dimension, so they stayed
+    where the old hanger had them - "the chassis tab on 74 x 98 is not inside the hanger slot".
+    The stack is one rigid arrangement: every member keeps its offset from the hanger width, so
+    it moves by exactly as much as the slots do.
+    """
+    scan = hanger_select.find_tab_stack_members(dim_values, row, hanger_w)
+    for sketch in scan.relation_placed:
+        log(f"  [TAB] {sketch} carries a tab width but no span of its own -- it is placed by "
+            f"sketch relations, so it is not linked (on AMY 36x36 those relations tie it to the "
+            f"row, and it follows the row for free)")
+    rules: list[OffsetRule] = []
+    for m in scan.members:
+        member_inset = m.inset_in
+        log(f"  [TAB] linked {m.dim} -> {hanger_dim}: a tab positioned by its own spacing, "
+            f"{m.value_meters / 0.0254:.3f}in, sits in the same slots as {row.dim} and moves "
+            f"with them ({member_inset:.3f}in inside the {hanger_w / 0.0254:.3f}in hanger)")
+        rules.append(OffsetRule(
+            component=policy.component_of(m.dim),
+            target_dim=m.dim,
+            source_dim=hanger_dim,
+            offset_meters=-member_inset * 0.0254,
+            note=(f"hanging tab seated in the same slots as {row.dim}; its own spacing sits "
+                  f"{member_inset:.3f}in inside the hanger width. Derived from the aligned model "
+                  f"({m.value_meters / 0.0254:.3f}in in a {hanger_w / 0.0254:.3f}in hanger)."),
+        ))
+    return rules
+
+
+def _check_row_against_hanger_slots(dim_values: dict[str, float], row, inset_in: float,
+                                    skip: list[SkipEntry]) -> None:
+    """Warn when the tab row does not sit where the HANGER'S slot sketch says it should.
+
+    The stored inset is measured, so it is only right on a model whose tabs are in their slots.
+    The generator trusts that because it normally runs on the product as the client authored it
+    - but Generate Rules can be pressed after a resize too, and on AMY 24x48 -> 44x68 that model
+    has its row 15.000in inside a 28.500in hanger whose slots say 9.500in. Storing that would make
+    every later resize faithfully PRESERVE the misalignment.
+
+    A warning, never a gate: the prefabs carry no slot position dim at all, and nothing here can
+    say which of the two numbers is right - only that they disagree.
+    """
+    expected = hanger_select.hanger_slot_row_insets(dim_values)
+    if not expected:
+        return
+    if hanger_select.slot_datum(inset_in, expected) is not None:
+        log(f"  [TAB] row inset {inset_in:.3f}in matches the hanger's own slot sketch -- the "
+            f"model is aligned, so the stored link is right")
+        return
+    detail = " or ".join(f"{e:.3f}in" for e in sorted(set(round(e, 3) for e in expected)))
+    log(f"  [TAB] WARNING -- {row.dim} sits {inset_in:.3f}in inside the hanger, but the hanger's "
+        f"slot sketch puts its slots {detail} inside. This model's tabs are probably NOT in "
+        f"their slots right now; generate rules from a fresh Connect (an unmodified copy)")
+    skip.append(SkipEntry(
+        name=row.dim,
+        reason=(f"WARNING: the tab row sits {inset_in:.3f}in inside the hanger but the hanger's "
+                f"slots are {detail} inside - the tabs look misaligned in this model. The "
+                f"stored link keeps whatever offset the model has now; reconnect (fresh copy) "
+                f"and generate rules again before resizing.")))
 
 
 async def generate_rules(req: GenerateRulesRequest) -> GenerateRulesResponse:

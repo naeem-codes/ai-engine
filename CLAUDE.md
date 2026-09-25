@@ -417,6 +417,38 @@ On the swap path its driving width comes from `target_width_meters`, **not** fro
 no longer holds a hanger dim — reading it from there would silently leave the tabs at the old
 hanger's spacing.
 
+**Stored tab links (preferred path) — one per dimensioned feature of the tab STACK.**
+`generate_rules._tab_spacing_offset` stores `offset` links (target = chassis dim, source = hanger
+width, offset measured on the authored model); `interpret._hanger_follower_updates` writes
+`new_hanger_w + offset` for EVERY one of them, row first (`_clip_tab_alignment` reads the first).
+Identification, in order:
+1. the 4.25±0.25" inset window (AMBER/KELLY/PIAZZA/BREAM) — row only, unchanged;
+2. else the **slot-row structure**: the chassis sketch carrying the 1.750" slot length, span =
+   its largest dim (AMY `D2@Sketch53`, Cut-Extrude7's notches), plus every **stack member** on the
+   same part: a sketch with a tab width 0–3/16" under the slot and a span inside the row's
+   footprint (AMY 24x48 `D1@Sketch35` = 10.125", Boss-Extrude2's tabs). A tab sketch with no span
+   (AMY 36x36) is placed by relations to the notch and is left alone.
+**Non-canonical stacks (AMY) are positioned against the fitted hanger's SLOTS, not a width
+offset** (`interpret._slot_relative_tab_updates`). Every hanger dimensions its slot's outer end
+`D2@Sketch3` in from its edge — 0.375" on every catalogue part (0.380" on #1215), 4.750" on AMY's
+bespoke 12214 — measured by opening each part (table: `hanger_select.PREFAB_SLOT_EDGE_INSET_IN`).
+The catalogue "4.25"" is the INNER slot span, 2 × (0.375 + 1.750); AMY's `D2@Sketch53` is the OUTER
+span. So: row = new hanger width − (slot outer inset + datum), datum ∈ {0, 1 slot, 2 slots} read off
+the aligned model; members keep their distance from the row. Kept/stretched → the fitted hanger's
+own inset (slots travel with its edge: 23 → 28.5" still 4.750" in, measured live); prefab → the
+table. A width offset breaks the moment a different hanger is fitted — the 2026-09-25 74x98 → 24x48
+bug (row sent to 10.000" on #1119, whose slots need 13.500"). Canonical (4.25") stored links keep
+the original path. All-or-nothing: if one member cannot be written, none is.
+**The mounting-slot follower never writes a tab-stack sketch** (`_tab_stack_sketches`): the app's
+row finder reported `Cut-Extrude7`'s notches as mounting slots and they were cut to 0.500". Generation warns (skip entry) if the row disagrees with the hanger's own slot sketch
+(2 × `D2@Sketch3` on AMY) — that means rules were generated on an already-misaligned model.
+**No stored link (rules not regenerated)** → after the legacy SKETCH81 search finds nothing,
+`_live_tab_stack_links` reads the same stack off the live model, but only when the hanger's slot
+sketch proves the row is on the slots right now; a misaligned model or a hanger with no slot
+position dim gets nothing written. Verified in SolidWorks 2026-09-25 (AMY 54x68, hanger 35"):
+`D2@Sketch53` 25.5 / `D1@Sketch35` 22.125 → notch 11.000–12.750 = slot, tab 11.062–12.688, no errors.
+Tests: `tests/test_amy_tab_stack.py`, `tests/test_tab_row_found_by_slot_length.py`.
+
 ---
 
 ## `/generate-rules`

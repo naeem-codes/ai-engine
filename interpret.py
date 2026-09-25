@@ -281,6 +281,8 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
     )
     def finish(out: list[DimensionChange],
                hanger_w: float | None = None,
+               to_prefab: bool = False,
+               prefab_part: str = "",
                ) -> tuple[list[DimensionChange], HangerSelection]:
         """Append the chassis HANGING TAB follower, then return.
 
@@ -295,6 +297,10 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         the COMPONENT SWAP path: there the new width arrives as a different part file, not as a
         dimension write, so reading it back out of `out` would find nothing and silently leave
         the tabs at the old hanger's spacing.
+
+        `to_prefab` says the hanger arriving is a CATALOGUE part (`prefab_part`), whose slots
+        are cut to the catalogue pattern rather than to the fitted hanger's own inset — see
+        `_hanger_follower_updates`.
         """
         if not w_dim:
             return out, sel
@@ -317,7 +323,7 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         row_now = _tab_row(req)
         span = _row_headroom(req, changes)
         for dim, new_val, _cur_inset, applied_in in _hanger_follower_updates(
-                req, old_w, new_w - old_w, model_rules):
+                req, old_w, new_w - old_w, model_rules, to_prefab, prefab_part):
             # Only the dim that actually drives the measured row, for the reason
             # `_tab_dim_in_row` documents: on most products the row in hand is the MOUNTING
             # slots and the tabs are a separate row the app never reported.
@@ -374,7 +380,8 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
         sel.replace = True
         log(f"  [HANGER] → replace the placed hanger with prefab {choice.part_name} "
             f"({choice.target_width_in:g}x{choice.target_height_in:g}in)")
-        return finish([], hanger_w=choice.target_width_m)
+        return finish([], hanger_w=choice.target_width_m, to_prefab=True,
+                      prefab_part=choice.part)
 
     # ── resize_fitted: no prefab spans this glass, so stretch the one that is fitted ──
     out: list[DimensionChange] = []
@@ -821,7 +828,26 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
     return max(proportional, no_overlap)
 
 
+def _tab_stack_sketches(req: InterpretRequest, model_rules=None) -> set[str]:
+    """Every sketch (`SKETCH53 [2222-CHASSIS-1]`) that belongs to the hanging-tab stack.
+
+    From the stored links, and by structure off the live model — the structure test needs no
+    alignment, because here it only decides what a MOUNTING-slot follower must keep its hands
+    off, not where anything goes.
+    """
+    keys = {hanger_select.sketch_key(n) for n, _ in _stored_tab_links(req, model_rules)}
+    dim_values = {d.name: d.value_meters for d in req.dimensions}
+    for row in hanger_select.find_tab_spacing_by_slot_row(dim_values, math.inf,
+                                                          req.component_types):
+        keys.add(hanger_select.sketch_key(row.dim))
+        for m in hanger_select.find_tab_stack_members(dim_values, row, math.inf,
+                                                      req.component_types).members:
+            keys.add(hanger_select.sketch_key(m.dim))
+    return keys
+
+
 def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange],
+                           model_rules=None,
                            ) -> list[tuple[str, float, float]]:
     """Scale the chassis mounting slots with the chassis width, in both directions.
 
@@ -837,6 +863,13 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
 
     Only fires when a WIDTH dim on the slot's own component moved this turn.
 
+    NEVER on a hanging-tab row, however the app reported it. The app's row finder cannot tell a
+    tab notch from a mounting slot by shape, and live 2026-09-25 (AMY 74x98 -> 24x48) it handed
+    over `Cut-Extrude7`'s notches (`D1@Sketch53` = 1.750in, the hanger slot's own length) as the
+    mounting slots; this follower then "shortened the mounting slots to 0.500in" and cut the
+    notches down to a third of the slot the tab has to pass through. The notch width belongs to
+    the hanger's slot, and the tab stack is positioned by `_hanger_follower_updates`.
+
     Returns (dim_name, new_value_meters, current_value_meters).
     """
     current = {d.name: d.value_meters for d in req.dimensions}
@@ -845,6 +878,11 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
     if not req.slot_rows:
         return out
     tab_row = _tab_row(req)          # None on every rectangle, and on anything unmeasured
+    tab_sketches = _tab_stack_sketches(req, model_rules)
+    for row in req.slot_rows:
+        if hanger_select.sketch_key(row.dim) in tab_sketches:
+            log(f"  [SLOTS] {row.dim} is part of the hanging-tab stack, not a mounting-slot row — "
+                f"left to the tab follower")
 
     for change in changes:
         if (req.dim_axis_labels or {}).get(change.name) != "W":
@@ -855,6 +893,8 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
         for row in req.slot_rows:
             if row.component != comp:
                 continue                    # the row lives on a different part
+            if hanger_select.sketch_key(row.dim) in tab_sketches:
+                continue                    # a tab notch, not a mounting slot — see above
             if row.dim == change.name:
                 continue                    # the slot dim itself is not a trigger
             if row.dim in seen or row.dim not in current:
@@ -1243,20 +1283,38 @@ def _row_headroom(req: InterpretRequest, changes: list[DimensionChange],
 
 
 def _stored_tab_link(req: InterpretRequest, model_rules) -> tuple[str, float] | None:
-    """The rules file's hanging-tab link as (live_dim_name, offset_meters), if it has one.
+    """The rules file's hanging-tab ROW link as (live_dim_name, offset_meters), if it has one.
+
+    The row is the spacing the rest of the stack is measured from — see `_stored_tab_links`,
+    which returns it first.
+    """
+    links = _stored_tab_links(req, model_rules)
+    return links[0] if links else None
+
+
+def _stored_tab_links(req: InterpretRequest, model_rules) -> list[tuple[str, float]]:
+    """Every hanging-tab link in the rules file as (live_dim_name, offset_meters), ROW FIRST.
 
     Only a link whose TARGET is a chassis dim and whose SOURCE is a hanger dim is taken -- a
     user-authored offset between two unrelated dims must not be mistaken for the tab spacing,
     and it is handled properly by `expand_offsets` anyway.
 
-    `expand_offsets` cannot serve this case, which is why the follower reads the link directly:
+    `expand_offsets` cannot serve this case, which is why the follower reads the links directly:
     it only fires when the source dim is among the turn's changes, and on a prefab SWAP no hanger
     dimension is written at all (the swapped-in file already carries the catalogue size). The
     live hanger width is known here and nowhere else.
+
+    MORE THAN ONE is normal on AMY 24x48: the notch row (`D2@Sketch53`, Cut-Extrude7) and the
+    tabs (`D1@Sketch35`, Boss-Extrude2) each carry their own spacing, and reading only the first
+    link moved the notches out from under tabs that stayed put. The generator writes the row
+    first; it is re-identified here by the slot length its sketch carries, so a hand-reordered
+    file cannot hand the row's role to a tab.
     """
     if model_rules is None:
-        return None
+        return []
     live = [d.name for d in req.dimensions]
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
     for r in getattr(model_rules, "offset", []) or []:
         if not r.target_dim or not r.source_dim:
             continue
@@ -1265,23 +1323,36 @@ def _stored_tab_link(req: InterpretRequest, model_rules) -> tuple[str, float] | 
         if not policy.is_hanger(r.source_dim, None, req.component_types):
             continue
         resolved = _resolve_stored_dim(r.target_dim, live, req.component_types)
-        if resolved:
-            return resolved, r.offset_meters
-    return None
+        if resolved and resolved not in seen:
+            seen.add(resolved)
+            out.append((resolved, r.offset_meters))
+    if len(out) > 1:
+        slot_m = hanger_select.HANGER_SLOT_LENGTH_IN * 0.0254
+        tol_m = hanger_select.HANGER_SLOT_LENGTH_TOL_IN * 0.0254
+        row_sketches = {hanger_select.sketch_key(d.name) for d in req.dimensions
+                        if abs(d.value_meters - slot_m) <= tol_m}
+        rows = [link for link in out if hanger_select.sketch_key(link[0]) in row_sketches]
+        if len(rows) == 1:
+            out.remove(rows[0])
+            out.insert(0, rows[0])
+    return out
 
 
 def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
-                             model_rules=None,
+                             model_rules=None, to_prefab: bool = False, prefab_part: str = "",
                              ) -> list[tuple[str, float, float, float]]:
     """Chassis dims that track the hanger width, shifted by the hanger's width delta.
 
-    Yields (dim_name, new_value_meters, current_inset_inches, applied_inset_inches).
+    Yields (dim_name, new_value_meters, current_inset_inches, applied_inset_inches), the tab
+    ROW first.
 
     TWO PATHS, and which one runs matters more than what either does.
 
-    1. A STORED LINK, written once by `generate_rules._tab_spacing_offset` from the model as the
-       client authored it. The dim is NAMED, so nothing has to be recognised and drift cannot
-       hide it. This is the path that should run on every product generated from now on.
+    1. STORED LINKS, written once by `generate_rules._tab_spacing_offset` from the model as the
+       client authored it. The dims are NAMED, so nothing has to be recognised and drift cannot
+       hide them. This is the path that should run on every product generated from now on.
+       There is one per dimensioned feature in the tab stack — the row, plus (AMY 24x48) the
+       tabs' own spacing — and every one of them moves, or the stack comes apart.
 
     2. The legacy geometric search below, kept verbatim for rule sets written before the link
        existed. It identifies the dim by "sits 4.25" +/-1.0" inside the current hanger width",
@@ -1296,28 +1367,203 @@ def _hanger_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: 
     then confidently writes to a dim it has never touched before. Measured on 12204 at a 24"
     hanger: the real `D1@Sketch81` (15.750") falls outside, `D5@Sketch105` (20.000") is left
     alone in the window. Doing nothing is the correct failure here; the fix is path 1.
+
+    3. A NON-canonical stack (AMY), from stored links or read off the live model: positioned
+       against the fitted hanger's own SLOTS, not against a hanger-width offset. See
+       `_slot_relative_tab_updates` — a hanger-width offset stops being true the moment a
+       different hanger is fitted, which is exactly what broke AMY 74x98 -> 24x48.
+
+    Canonical stored links (the row sits the catalogue 4.25in inside, AMBER/KELLY/PIAZZA/BREAM)
+    keep path 1 exactly as it was: verified live, and 4.25in IS the prefab slot pattern.
     """
+    links = _stored_tab_links(req, model_rules)
+    if links and abs(-links[0][1] / 0.0254 - hanger_select.EXPECTED_TAB_INSET_IN) <= 0.005:
+        return _apply_tab_links(req, links, old_hanger_w, delta, to_prefab, "stored link")
+
+    if not links:
+        updates = _legacy_tab_follower_updates(req, old_hanger_w, delta)
+        if updates:
+            return updates
+
+    updates = _slot_relative_tab_updates(req, old_hanger_w, delta, to_prefab, prefab_part, links)
+    if updates is not None:
+        return updates
+    # No slot position anywhere to measure against: the stored offsets are all there is.
+    if links:
+        return _apply_tab_links(req, links, old_hanger_w, delta, to_prefab, "stored link")
+    return []
+
+
+def _apply_tab_links(req: InterpretRequest, links: list[tuple[str, float]],
+                     old_hanger_w: float, delta: float, to_prefab: bool, source: str,
+                     ) -> list[tuple[str, float, float, float]]:
+    """Write every tab-stack link as `new_hanger_width + offset`, the row (links[0]) first."""
     updates: list[tuple[str, float, float, float]] = []
+    current = {d.name: d.value_meters for d in req.dimensions}
+    new_hanger_w = old_hanger_w + delta
 
-    stored = _stored_tab_link(req, model_rules)
-    if stored is not None:
-        name, offset_m = stored
-        current = {d.name: d.value_meters for d in req.dimensions}.get(name, 0.0)
-        new_hanger_w = old_hanger_w + delta
-        new_val = new_hanger_w + offset_m
-        inset_in = -offset_m / 0.0254
+    # WHOSE slots are the tabs about to sit in? That decides the inset, and nothing else
+    # does. A prefab being swapped in brings its own slot pattern, cut the canonical 4.25in
+    # total inside its width on all four confirmed client pairs (14.25 -> 10.000,
+    # 20 -> 15.750, 30 -> 25.750, 40 -> 35.740), so the row moves onto THAT. A hanger that is
+    # kept or merely stretched keeps the slots it has — they travel with its edge, measured
+    # on AMY 23.000 -> 28.500in: still 4.750in in from each edge — so the stored inset stands.
+    #
+    # Getting this wrong in the generous direction is not a near miss: AMY 24x48 -> 34x58
+    # keeps its bespoke 23.000in hanger, and forcing the canonical inset moved the tab row
+    # 13.500in -> 18.750in, off slots that never moved (live 2026-09-21).
+    #
+    # The whole stack shifts by ONE amount, taken from the row: the tabs sit a fixed
+    # distance inside the notches, whichever hanger the notches are lined up with.
+    row_inset_in = -links[0][1] / 0.0254
+    shift_in = 0.0
+    if to_prefab and abs(row_inset_in - hanger_select.EXPECTED_TAB_INSET_IN) > 0.005:
+        shift_in = row_inset_in - hanger_select.EXPECTED_TAB_INSET_IN
+        log(f"  [TAB] {links[0][0]} sits {row_inset_in:.3f}\" inside the fitted hanger, but "
+            f"a PREFAB is being fitted and its slots are cut "
+            f"{hanger_select.EXPECTED_TAB_INSET_IN:.2f}\" inside its width — the tab stack "
+            f"moves onto the prefab's pattern")
+
+    for name, offset_m in links:
+        inset_in = -offset_m / 0.0254 - shift_in
+        new_val = new_hanger_w - inset_in * 0.0254
         if new_val <= 0:
-            log(f"  [TAB] stored link {name} SKIPPED — would go to {new_val * 1000:.2f} mm")
+            # All or nothing: the members are one arrangement, and moving the rest without
+            # this one pulls the tabs out of their notches.
+            log(f"  [TAB] {source} {name} SKIPPED — would go to {new_val * 1000:.2f} mm; "
+                f"the rest of the tab stack is left alone with it")
             return []
-        # A stored link turns drift from something that DISABLES the follower into something it
-        # repairs: the correct value no longer depends on the current one being right.
-        was_in = (old_hanger_w - current) / 0.0254
-        if abs(was_in - inset_in) > 0.005:
+        # A stored link turns drift from something that DISABLES the follower into something
+        # it repairs: the correct value no longer depends on the current one being right.
+        was_in = (old_hanger_w - current.get(name, 0.0)) / 0.0254
+        if abs(was_in - inset_in) > 0.005 and not to_prefab:
             log(f"  [TAB] {name} is {was_in:.3f}\" inside the {old_hanger_w / 0.0254:.3f}\" "
-                f"hanger but the stored link says {inset_in:.3f}\" — this model drifted, and "
+                f"hanger but the {source} says {inset_in:.3f}\" — this model drifted, and "
                 f"this resize corrects it")
-        return [(name, new_val, was_in, inset_in)]
+        updates.append((name, new_val, was_in, inset_in))
+    return updates
 
+
+def _tab_stack_names(req: InterpretRequest, links: list[tuple[str, float]],
+                     hanger_w: float) -> list[str]:
+    """The tab stack's live dim names, ROW FIRST: from the stored links, else off the model.
+
+    Off the model is the same identification `generate_rules._tab_spacing_offset` stores — the
+    row by the 1.750in slot length its sketch carries, the members by tab width plus footprint —
+    so a product gets the fix whether or not its rules were regenerated. Live 2026-09-25 19:03:
+    the user reconnected and resized AMY on a rule set with no links, and nothing moved.
+    """
+    if links:
+        return [name for name, _ in links]
+    dim_values = {d.name: d.value_meters for d in req.dimensions}
+    rows = hanger_select.find_tab_spacing_by_slot_row(dim_values, hanger_w, req.component_types)
+    if not rows:
+        return []
+    if len(rows) > 1:
+        log(f"  [TAB] tab stack NOT identified — {len(rows)} chassis sketches carry the slot "
+            f"length with a span: {', '.join(r.dim for r in rows)}")
+        return []
+    scan = hanger_select.find_tab_stack_members(dim_values, rows[0], hanger_w,
+                                                req.component_types)
+    return [rows[0].dim] + [m.dim for m in scan.members]
+
+
+def _slot_relative_tab_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
+                               to_prefab: bool, prefab_part: str,
+                               links: list[tuple[str, float]],
+                               ) -> list[tuple[str, float, float, float]] | None:
+    """Put the tab stack where the FITTED hanger's slots will be, measured, not assumed.
+
+    The law (see `hanger_select.PREFAB_SLOT_EDGE_INSET_IN` for the survey behind it): every
+    hanger dimensions its slot's outer end `D2@Sketch3` in from its edge, so the slots' outer span
+    is `width - 2 x D2@Sketch3`, and the tab row sits a fixed DATUM inside that span — 0 for AMY's
+    notch row, which is dimensioned to the slots' outer ends. Each other stack member (the tabs'
+    own spacing) keeps its distance from the row. So:
+
+        row      = new hanger width - (slot outer inset of the hanger being fitted + datum)
+        member   = row + (member - row)
+
+    and the only thing that differs between the three hanger outcomes is the slot inset:
+      * kept or stretched — the fitted hanger's own, read off the model (its slots travel with
+        its edge: AMY 23 -> 28.5in, still 4.750in in, measured live);
+      * a prefab swapped in — the catalogue part's, from the measured table.
+
+    Storing an offset from the hanger WIDTH, as the first version did, is only true while the
+    hanger the offset was measured on stays fitted. Live 2026-09-25, AMY 74x98 -> 24x48: the
+    stretched bespoke hanger was swapped for prefab #1119, and the row was sent to 10.000in (a
+    4.25in inset assumed for the prefab) against slots that need 13.500in.
+
+    Returns None when there is no slot position to measure against at all (the caller falls back
+    to the stored offsets); [] when it declines — a misaligned model with nothing to re-seat it
+    from, or no stack — and says why.
+    """
+    if old_hanger_w <= 0:
+        return []
+    names = _tab_stack_names(req, links, old_hanger_w)
+    if not names:
+        return []
+    current = {d.name: d.value_meters for d in req.dimensions}
+    if any(n not in current for n in names):
+        return []
+    slot_insets = hanger_select.hanger_slot_row_insets(current, req.component_types)
+    if not slot_insets:
+        if not links:
+            log(f"  [TAB] tab stack {', '.join(names)} left alone — the fitted hanger's slots "
+                f"carry no position dim, so there is nothing to line the stack up against")
+        return None
+
+    row = names[0]
+    row_inset_in = (old_hanger_w - current[row]) / 0.0254
+    fit = hanger_select.slot_datum(row_inset_in, slot_insets)
+    if fit is not None:
+        slot_now_in, datum_in = fit
+        rel = {n: current[n] - current[row] for n in names}
+        basis = "the model, which the hanger's own slot sketch confirms is aligned"
+    else:
+        # The model has drifted. A stored link can still re-seat it, provided the link was made
+        # on a hanger with THIS slot pattern — its own inset must fit the current slots.
+        stored = dict(links)
+        fit = (hanger_select.slot_datum(-stored[row] / 0.0254, slot_insets)
+               if row in stored else None)
+        if fit is None:
+            detail = " or ".join(f"{e:.3f}\"" for e in sorted({round(e, 3) for e in slot_insets}))
+            log(f"  [TAB] tab stack left alone — {row} sits {row_inset_in:.3f}\" inside the hanger "
+                f"but its slots are {detail} in: this model's tabs are already off the slots and "
+                f"nothing stored says where they belong. Reconnect for a fresh copy")
+            return []
+        slot_now_in, datum_in = fit
+        rel = {n: stored[n] - stored[row] for n in names if n in stored}
+        if len(rel) != len(names):
+            return []
+        basis = "the stored link — the model had drifted and this resize re-seats it"
+
+    if to_prefab:
+        slot_new_in = 2 * hanger_select.prefab_slot_edge_inset_in(prefab_part)
+        why = f"prefab #{prefab_part or '?'}'s slots, {slot_new_in / 2:.3f}\" in from its edge"
+    else:
+        slot_new_in = slot_now_in
+        why = f"the fitted hanger's slots, {slot_now_in / 2:.3f}\" in from its edge"
+
+    new_hanger_w = old_hanger_w + delta
+    row_new = new_hanger_w - (slot_new_in + datum_in) * 0.0254
+    updates: list[tuple[str, float, float, float]] = []
+    for n in names:
+        new_val = row_new + rel[n]
+        if new_val <= 0:
+            log(f"  [TAB] tab stack left alone — {n} would go to {new_val * 1000:.2f} mm, and the "
+                f"stack only moves together")
+            return []
+        updates.append((n, new_val, (old_hanger_w - current[n]) / 0.0254,
+                        (new_hanger_w - new_val) / 0.0254))
+    log(f"  [TAB] tab stack lined up with {why} (row datum {datum_in:.3f}\"), from {basis}: "
+        f"{', '.join(names)}")
+    return updates
+
+
+def _legacy_tab_follower_updates(req: InterpretRequest, old_hanger_w: float, delta: float,
+                                 ) -> list[tuple[str, float, float, float]]:
+    """Path 2 of `_hanger_follower_updates`, kept verbatim — see its docstring."""
+    updates: list[tuple[str, float, float, float]] = []
     seen: set[str] = set()
     for d in req.dimensions:
         upper = d.name.upper()
@@ -1936,7 +2182,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
         # Slots before the hanger: this reads the chassis width that the rules just set, and
         # must be in `changes` before the app's inside-out ordering sequences the batch.
-        slots = _slot_follower_updates(req, changes)
+        slots = _slot_follower_updates(req, changes, model_rules)
         for dim, new_val, old_val in slots:
             changes.append(DimensionChange(name=dim, value_meters=new_val))
         if slots:

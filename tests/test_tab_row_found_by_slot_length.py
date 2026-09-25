@@ -21,9 +21,11 @@ carries that same 1.750in with the row's spacing as its largest dim. Verified ag
 chassis dim in every log on this machine: exactly one sketch per chassis contains a 1.750in dim,
 and in all three known cases its largest dim is the tab spacing. See `HANGER_SLOT_LENGTH_IN`.
 
-The VALUE is the canonical 4.25in, not AMY's own 9.500in, because the inset belongs to whichever
-hanger is fitted and after the swap that is a prefab -- the client's confirmed pairs are
-14.25 -> 10.000, 20 -> 15.750, 30 -> 25.750, 40 -> 35.740. So 40.000 - 4.250 = 35.750in.
+After a swap the row lines up with the PREFAB's slots, not with AMY's own 9.500in inset. It is
+NOT the canonical 4.25in either, which this file first asserted: measured 2026-09-25 by opening
+every catalogue part, 4.25in is the INNER span of a prefab's slots, 2 x (0.375 + 1.750). AMY's
+`D2@Sketch53` is the OUTER span, so on #1215 (slots end 0.380in in from its edge) it is
+40.000 - 0.760 = 39.240in. See `hanger_select.PREFAB_SLOT_EDGE_INSET_IN`.
 """
 
 import os
@@ -117,29 +119,30 @@ def test_the_stored_link_records_what_the_model_ACTUALLY_has():
     assert rules[0].offset_meters == pytest.approx(-9.500 * IN)
 
 
-def _follower(dims, old_w, new_w, inset_in, to_prefab):
+def _follower(dims, old_w, new_w, inset_in, to_prefab, part=""):
     req = models.InterpretRequest(
         instruction="", shape="rect",
         dimensions=[models.DimensionIn(name=n, value_meters=v) for n, v in dims.items()])
     rules = types.SimpleNamespace(offset=[types.SimpleNamespace(
         target_dim=TAB_DIM, source_dim=HANGER_W_DIM, offset_meters=-inset_in * IN)])
     return interpret._hanger_follower_updates(
-        req, old_w * IN, (new_w - old_w) * IN, rules, to_prefab)
+        req, old_w * IN, (new_w - old_w) * IN, rules, to_prefab, part)
 
 
 def test_a_PREFAB_swap_lands_the_tabs_on_the_new_hangers_slots():
     """35.000in custom hanger -> 40.000in prefab #1215, the swap that was actually performed.
 
-    The prefab brings its own slot pattern, cut the canonical 4.25in inside its width, so the
-    tabs move onto THAT rather than carrying AMY's 9.500in forward (which would give 30.500in).
+    The prefab brings its own slot pattern — slot outer ends 0.380in in from its edge, measured —
+    so the notch row (the slots' outer span) moves onto THAT rather than carrying AMY's 9.500in
+    forward (which would give 30.500in).
     """
-    out = _follower(AMY, 35.000, 40.000, 9.500, to_prefab=True)
+    out = _follower(AMY, 35.000, 40.000, 9.500, to_prefab=True, part="1215")
     assert len(out) == 1
     dim, new_val, was_in, applied_in = out[0]
     assert dim == TAB_DIM
-    assert new_val == pytest.approx(35.750 * IN)      # 40.000 - 4.250
+    assert new_val == pytest.approx(39.240 * IN)      # 40.000 - 2 x 0.380
     assert was_in == pytest.approx(9.500, abs=1e-6)   # what the old custom hanger had
-    assert applied_in == pytest.approx(4.250)
+    assert applied_in == pytest.approx(0.760)
 
 
 def test_a_kept_hanger_leaves_the_tabs_exactly_where_they_are():
