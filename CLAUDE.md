@@ -448,6 +448,11 @@ sketch proves the row is on the slots right now; a misaligned model or a hanger 
 position dim gets nothing written. Verified in SolidWorks 2026-09-25 (AMY 54x68, hanger 35"):
 `D2@Sketch53` 25.5 / `D1@Sketch35` 22.125 → notch 11.000–12.750 = slot, tab 11.062–12.688, no errors.
 Tests: `tests/test_amy_tab_stack.py`, `tests/test_tab_row_found_by_slot_length.py`.
+**Parts seated in the hanger's slots (`on_hanger` mates) follow the HANGER's edge on every shape**,
+never the glass half-delta, and are HELD when the hanger does not change (`_hanger_seat_shifts`; was
+round-only until 2026-09-28 — MICHELLE's brackets moved +2" with the glass). If the app's swap then
+fails, it writes those mates and `follower_dims` back (`RestoreHangerFollowers`).
+Tests: `tests/test_seated_bracket_follows_hanger.py`.
 
 ---
 

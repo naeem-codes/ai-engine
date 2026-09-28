@@ -506,16 +506,18 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
             if abs(delta) > 1e-9:
                 half_delta[axis] = delta / 2.0
 
-    # A ROUND product does not play by this rule at all — see `_round_shifts`.
+    # A part seated in the hanger's slots follows the HANGER on every shape — the slot is cut in
+    # the hanger, whatever outline the glass has. Gated behind `is_round` until 2026-09-28, which
+    # moved MICHELLE's seated brackets by the glass half-delta even when the hanger stayed put.
+    seat_shifts = _hanger_seat_shifts(req, applied, current, hanger)
+    # A ROUND product does not play by the edge rule at all — see `_round_shifts`.
     round_shifts: dict[tuple[str, str], float] = {}
-    seat_shifts: dict[tuple[str, str], float] = {}
     if req.is_round:
         # The hanger seats first: everything else takes its X from what the seated brackets did.
-        seat_shifts = _hanger_seat_shifts(req, applied, current, hanger)
         round_shifts = _round_shifts(req, applied, current, seat_shifts)
         if not round_shifts and not seat_shifts:
             return []
-    elif not half_delta:
+    elif not half_delta and not seat_shifts:
         return []
 
     # The MASTER's own component must never be moved by its own resize. The real AMBER carries
@@ -532,10 +534,10 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
     out: list[tuple[str, float, float, str]] = []
     seen: set[str] = set()
     for mate in req.mate_positions:
-        if req.is_round:
-            # A part seated in the hanger's slots is governed by the HANGER, never by the disc.
+        if req.is_round or mate.on_hanger:
+            # A part seated in the hanger's slots is governed by the HANGER, never by the glass.
             # The two rules would fight, and the slot wins: a bracket half an inch out of its
-            # slot is not fitted, however tidily it sits on the circle.
+            # slot is not fitted, however tidily it sits against the edge.
             shift = (seat_shifts if mate.on_hanger else round_shifts
                      ).get((mate.component, mate.axis))
             if shift is None or abs(shift) < 1e-9:
@@ -579,11 +581,11 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         if new_val <= 0:
             log(f"  [MATE] {mate.dim} SKIPPED — would go to {new_val * 1000:.2f} mm")
             continue
-        why = ((f"moved {shift / 0.0254:+.3f}\" with the hanger's {mate.axis} edge, so its tab "
-                f"stays in the slot"
-                if mate.on_hanger else
-                f"moved {shift / 0.0254:+.3f}\" along its own radius, so it keeps its share of "
-                f"the disc without fouling the LED")
+        why = (f"moved {shift / 0.0254:+.3f}\" with the hanger's {mate.axis} edge, so its tab "
+               f"stays in the slot"
+               if mate.on_hanger else
+               f"moved {shift / 0.0254:+.3f}\" along its own radius, so it keeps its share of "
+               f"the disc without fouling the LED"
                if req.is_round else
                f"half the {shift * 2 / 0.0254:+.3f}\" master change, keeping its distance from "
                f"the edge")
