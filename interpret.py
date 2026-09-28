@@ -1658,8 +1658,25 @@ def _hanger_bracket_follower_updates(req: InterpretRequest, old_hanger_w: float,
     return updates
 
 
+def _warn(text: str) -> None:
+    """An ADVISORY for the engine log only — never the chat explanation.
+
+    The user asked (2026-09-25) for no warnings on the main form: the explanation says what the
+    resize DID, and caveats about how it was done (a borrowed rule set, a circle the rules do not
+    move, a hanger outside its target band) go here, where a support trace still finds them.
+    Anything that STOPS a resize is not a warning and still comes back as an error.
+    """
+    text = (text or "").strip()
+    if text:
+        log(f"  [WARN] {text}")
+
+
 def _hanger_note(hanger: HangerSelection | None) -> str:
-    """One human-readable clause about the hanger, for the chat explanation."""
+    """One human-readable clause about the hanger, for the chat explanation.
+
+    What was chosen, only. Whether the choice sits well in the 20-25% band is an advisory and is
+    logged instead — see `_warn`.
+    """
     if hanger is None:
         return ""
     if hanger.keep_fitted:
@@ -1675,11 +1692,13 @@ def _hanger_note(hanger: HangerSelection | None) -> str:
     # so this says what was CHOSEN, not what landed — the app reports the outcome separately.
     note = f" Hanger to be replaced with prefab #{hanger.part} ({pct})."
     if hanger.needs_review:
-        note += " NEEDS REVIEW — well under the 20% target."
+        _warn(f"hanger #{hanger.part} NEEDS REVIEW — well under the 20% target ({pct}).")
     elif hanger.over_ceiling:
-        note += " Note: every prefab exceeds 25% at this size; smallest that fits was used."
+        _warn(f"every prefab exceeds 25% at this size; the smallest that fits (#{hanger.part}) "
+              f"was used.")
     elif hanger.under_target:
-        note += " Slightly under the 20% target, but the largest that stays within 25%."
+        _warn(f"hanger #{hanger.part} is slightly under the 20% target ({pct}), but the largest "
+              f"that stays within 25%.")
     return note
 
 
@@ -1703,7 +1722,8 @@ def _round_circles_left_behind(req: InterpretRequest, master: str, also_change: 
     The app now labels those two dims (it measures them against the ring's own radius), but a
     RULE SET SAVED BEFORE THAT still lists three dependants and none of them is the channel — so
     the fix looks applied and changes nothing. Exactly what happened: the run that should have
-    shown it regenerated no rules at all. Hence this line, which says so in the chat.
+    shown it regenerated no rules at all. Hence this line — logged as a `[WARN]`, not shown in the
+    app's chat (the user asked for no warnings on the main form, 2026-09-25).
     """
     if not req.is_round or not req.radial_dims:
         return ""
@@ -1922,7 +1942,9 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
         live_dims = [d.name for d in req.dimensions]
         selection = store.select_for_model(req.model_path, live_dims)
         model_rules = parse_rules(selection.doc, store.stem_of(req.model_path))
-        rules_note = selection.warning
+        # Advisory (a borrowed set, dims it names that are missing here) — the log, not the chat.
+        _warn(selection.warning)
+        rules_note = ""
         if model_rules is None:
             model_rules = load_rules(req.model_path)
             if model_rules is not None:
@@ -2089,7 +2111,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
 
         changes = _expand_master(if_changes, value_meters, also_change, current_dims,
                                  req.radial_dims)
-        rules_note += _round_circles_left_behind(req, if_changes, also_change, current_dims)
+        _warn(_round_circles_left_behind(req, if_changes, also_change, current_dims))
 
         # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this
         # the other axis was silently dropped and the explanation told the user to submit it
