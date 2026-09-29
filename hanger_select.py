@@ -675,7 +675,8 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                   tab_cap_w_in: float = 0.0,
                   obstacle_clear_in: float = 0.0,
                   round_glass: bool = False,
-                  fitted_glass_w_in: float = 0.0) -> HangerChoice:
+                  fitted_glass_w_in: float = 0.0,
+                  seat_cap_w_in: float = 0.0) -> HangerChoice:
     """Choose a hanger for a glass panel of `glass_w_in` x `glass_h_in` inches.
 
     `fitted_w_in`/`fitted_h_in` describe the hanger ALREADY in the model. Supplying them
@@ -739,6 +740,11 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
     # min() reaches all three without touching any of them.
     if tab_cap_w_in > 0:
         chassis_cap = min(chassis_cap, tab_cap_w_in)
+    # `seat_cap_w_in`: the widest hanger whose hanging bracket (which follows it) still sits as
+    # far from the glass's sides as the product was built with — `interpret._seat_gap_cap`.
+    # Folded into the same number for the same reason; 0 = not supplied.
+    if seat_cap_w_in > 0:
+        chassis_cap = min(chassis_cap, seat_cap_w_in)
 
     def _inside(w: float, h: float, cap_w: float, cap_h: float) -> bool:
         """Does a w x h hanger lie within a cap_w x cap_h panel (or a cap_w-diameter disc)?"""
@@ -890,7 +896,10 @@ def select_hanger(glass_w_in: float, glass_h_in: float,
                 return nearest
             return int(value / step) * step          # floor — never exceed the limit
 
-        s_w, s_h = _snap(new_w, max_w), _snap(new_h, cap)
+        # The width snaps inside the chassis cap as well as the glass: rounding a capped width UP
+        # past the cap used to fail the check below and throw the resized hanger away entirely.
+        s_w = _snap(new_w, max_w if round_glass else min(max_w, chassis_cap))
+        s_h = _snap(new_h, cap)
         if s_w > 0 and s_h > 0:
             new_w, new_h = s_w, s_h
 

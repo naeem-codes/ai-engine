@@ -256,11 +256,16 @@ def _hanger_changes(req: InterpretRequest, changes: list[DimensionChange],
                 f"capped at {tab_cap_w_in:.3f}\" — not the {chassis_w / 0.0254:.3f}\" the "
                 f"chassis measures across its middle")
 
+    # The hanging bracket follows the hanger, so keeping the bracket off the sides is a limit on
+    # the hanger. See `_seat_gap_cap`.
+    seat_cap_w_in = _seat_gap_cap(req, fitted_w, glass_w)
+
     choice = select_hanger_meters(glass_w, glass_h,
                                   fitted_w_in=fitted_w / 0.0254,
                                   fitted_h_in=fitted_h / 0.0254,
                                   chassis_w_in=chassis_w / 0.0254,
                                   tab_cap_w_in=tab_cap_w_in,
+                                  seat_cap_w_in=seat_cap_w_in,
                                   obstacle_clear_in=obstacle_clear_in,
                                   round_glass=req.is_round,
                                   # The diameter the fitted hanger is on TODAY. A round product
@@ -904,6 +909,11 @@ def _slot_follower_updates(req: InterpretRequest, changes: list[DimensionChange]
 
             spec = chassis_slots.spec_from_measurement(row)
             if spec is None:
+                if chassis_slots.is_hole_row(row) and row.dim not in seen:
+                    seen.add(row.dim)
+                    log(f"  [SLOTS] {row.dim} is a row of holes, not slots "
+                        f"({row.length_meters / 0.0254:.3f}\" long x "
+                        f"{row.slot_width_meters / 0.0254:.3f}\" wide) — left as drawn")
                 continue
             seen.add(row.dim)
 
@@ -1633,6 +1643,20 @@ def _hanger_bracket_follower_updates(req: InterpretRequest, old_hanger_w: float,
     the bracket away from the LED brackets because the bracket tracks the hanger.
     """
     updates: list[tuple[str, float, float]] = []
+    for name, value, inset_in in _hanging_bracket_dims(req, old_hanger_w, quiet=False):
+        new_val = value + delta
+        if new_val <= 0:
+            log(f"  [HANGER] bracket {name} SKIPPED — would go to {new_val * 1000:.2f} mm")
+            continue
+        updates.append((name, new_val, inset_in))
+    return updates
+
+
+def _hanging_bracket_dims(req: InterpretRequest, old_hanger_w: float, quiet: bool = True,
+                          ) -> list[tuple[str, float, float]]:
+    """(dim_name, current_value_meters, inset_inches) for every hanging-bracket width that seats
+    INSIDE the hanger - the dims `_hanger_bracket_follower_updates` moves with it."""
+    found: list[tuple[str, float, float]] = []
     seen: set[str] = set()
     for d in req.dimensions:
         if not policy.is_hanging_bracket(d.name, req.component_types):
@@ -1645,19 +1669,59 @@ def _hanger_bracket_follower_updates(req: InterpretRequest, old_hanger_w: float,
 
         inset_in = (old_hanger_w - d.value_meters) / 0.0254
         if not (-1e-9 <= inset_in <= hanger_select.MAX_BRACKET_INSET_IN):
-            log(f"  [HANGER] bracket candidate {d.name} SKIPPED — sits {inset_in:.3f}\" from "
-                f"the hanger width, outside the 0-{hanger_select.MAX_BRACKET_INSET_IN:.2f}\" a "
-                f"part seating INSIDE the hanger can have. Either it is not the hanging "
-                f"bracket, or this model's bracket is already misaligned — check it in "
-                f"SolidWorks")
+            if not quiet:
+                log(f"  [HANGER] bracket candidate {d.name} SKIPPED — sits {inset_in:.3f}\" from "
+                    f"the hanger width, outside the 0-{hanger_select.MAX_BRACKET_INSET_IN:.2f}\" a "
+                    f"part seating INSIDE the hanger can have. Either it is not the hanging "
+                    f"bracket, or this model's bracket is already misaligned — check it in "
+                    f"SolidWorks")
             continue
+        found.append((d.name, d.value_meters, inset_in))
+    return found
 
-        new_val = d.value_meters + delta
-        if new_val <= 0:
-            log(f"  [HANGER] bracket {d.name} SKIPPED — would go to {new_val * 1000:.2f} mm")
+
+def _seat_gap_cap(req: InterpretRequest, hanger_w_now: float, glass_w_new: float) -> float:
+    """The widest hanger, in inches, whose hanging bracket still sits at least as far from the
+    glass's left and right edges as the product was built with. 0 = no limit.
+
+    The bracket's end tabs drop into slots near the hanger's ends (measured on SUZI: tabs at
+    +-17.94..19.56", slots at +-17.87..19.62"), so its width is the hanger's minus a fixed inset
+    and moves one-for-one with it. Holding the bracket back on its own would pull the tabs out of
+    the slots; limiting the hanger keeps both. The user's rule, 2026-09-29: "mark the original
+    distance of the hanger bracket from the left and right side, and it should still keep that
+    distance after the resize".
+
+    The glass grows about its centre, so each edge moves half the width change and the bracket's
+    ends move half the hanger's change. Keeping a gap of at least `built` on both sides:
+
+        hanger_new <= hanger_now + (glass_new - glass_now) + 2 * min(gap_now - built, per side)
+
+    The frame parts (chassis, chassis corners, the LED strip drawn off them) all hold a constant
+    border from the glass edge, so a distance kept from the glass is kept from them too.
+    """
+    if req.is_round or not req.seat_gaps or hanger_w_now <= 0 or glass_w_new <= 0:
+        return 0.0
+    glass_w_now = next((d.value_meters for d in req.dimensions
+                        if d.name == req.master_width_dim), 0.0)
+    if glass_w_now <= 0:
+        return 0.0
+    gaps = {g.component.upper(): g for g in req.seat_gaps}
+    caps: list[float] = []
+    for name, _value, _inset in _hanging_bracket_dims(req, hanger_w_now):
+        g = gaps.get(policy.component_of(name).upper())
+        if g is None:
+            log(f"  [SEAT] {name}: no as-built distance from the glass edges was measured — the "
+                f"hanger is not limited by it")
             continue
-        updates.append((d.name, new_val, inset_in))
-    return updates
+        slack = min(g.left_meters - g.built_left_meters, g.right_meters - g.built_right_meters)
+        cap = hanger_w_now + (glass_w_new - glass_w_now) + 2 * slack
+        log(f"  [SEAT] {g.component} was built {g.built_left_meters / 0.0254:.3f}\" / "
+            f"{g.built_right_meters / 0.0254:.3f}\" from the glass's left / right edges and sits "
+            f"{g.left_meters / 0.0254:.3f}\" / {g.right_meters / 0.0254:.3f}\" now — to keep at "
+            f"least that on a {glass_w_new / 0.0254:.3f}\" glass the hanger it follows may be at "
+            f"most {cap / 0.0254:.3f}\" wide")
+        caps.append(cap)
+    return max(min(caps), 0.0) / 0.0254 if caps else 0.0
 
 
 def _warn(text: str) -> None:
@@ -1746,9 +1810,17 @@ def _round_circles_left_behind(req: InterpretRequest, master: str, also_change: 
 
 def _expand_master(master: str, value_meters: float, also_change: list[str],
                    current_dims: dict[str, float],
-                   radial_dims: dict[str, int] | None = None) -> list[DimensionChange]:
-    """One master dim plus its dependents, each moved by the master's CONSTANT OFFSET."""
+                   radial_dims: dict[str, int] | None = None,
+                   half_frame: set[str] | None = None) -> list[DimensionChange]:
+    """One master dim plus its dependents, each moved by the master's CONSTANT OFFSET.
+
+    A `half_frame` dependent sits on a part running from the centre line to ONE edge, so its far
+    edge moves half the master delta. That is the radius case exactly (centre to rim), and it
+    takes the same path: judged at double its value against the frame-spanning bar, then given
+    half the change.
+    """
     radial_dims = radial_dims or {}
+    half_frame = half_frame or set()
     master_current = current_dims.get(master, 0.0)
     out = [DimensionChange(name=master, value_meters=value_meters)]
     for dep in also_change:
@@ -1764,12 +1836,19 @@ def _expand_master(master: str, value_meters: float, also_change: list[str],
             log(f"    SKIP {dep!r} — not in dims")
             continue
         kind = radial_dims.get(dep, 0)
+        half = kind == 0 and dep in half_frame
+        if half:
+            kind = policy.RADIAL_RADIUS
         new_val = _dependent_value(current, master_current, value_meters, kind)
-        if kind == policy.RADIAL_RADIUS and new_val is not None:
+        if half and new_val is not None:
+            log(f"    [HALF] {dep!r} runs from the centre line to one edge — taking half the "
+                f"{(value_meters - master_current) / 0.0254:+.3f}\" change")
+        elif kind == policy.RADIAL_RADIUS and new_val is not None:
             log(f"    [ROUND] {dep!r} drives a RADIUS — taking half the "
                 f"{(value_meters - master_current) / 0.0254:+.3f}\" diameter change")
         if new_val is None:
-            log(f"    SKIP {dep!r} — {current / master_current:.1%} of the master: a "
+            log(f"    SKIP {dep!r} — {current / master_current:.1%} of the master"
+                f"{' (a half-frame part, judged at double)' if half else ''}: a "
                 f"fixed profile, not a frame-spanning dim (left at "
                 f"{current / 0.0254:.3f}\")")
             continue
@@ -1831,7 +1910,8 @@ def _second_axis_changes(data: dict, scope: str, primary_dim: str, model_rules,
     deps = list(rule.also_change) if rule is not None else []
     log(f"  [2-AXIS] also setting the {other_label} master {other_master!r} → "
         f"{other_value / 0.0254:.3f}\" with {len(deps)} dependent(s)")
-    return _expand_master(other_master, other_value, deps, current_dims, req.radial_dims), ""
+    return _expand_master(other_master, other_value, deps, current_dims, req.radial_dims,
+                          set(req.half_frame_dims)), ""
 
 
 # How close a dimension has to be to the master's own value before it is treated as THE SAME
@@ -1932,6 +2012,8 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
             d.name for d in req.dimensions
             if req.dim_axis_labels.get(d.name) == "H"
         ) or "  [H] dims: none")
+    if req.half_frame_dims:
+        log("  half-frame dims   : " + ", ".join(req.half_frame_dims))
 
 
     # ── Resize: rules are REQUIRED ────────────────────────────────────────────
@@ -2112,7 +2194,7 @@ async def interpret(req: InterpretRequest) -> InterpretResponse:
                 f"(⚙ Generate Rules) for this model."))
 
         changes = _expand_master(if_changes, value_meters, also_change, current_dims,
-                                 req.radial_dims)
+                                 req.radial_dims, set(req.half_frame_dims))
         _warn(_round_circles_left_behind(req, if_changes, also_change, current_dims))
 
         # SECOND AXIS — "24 x 36" names both. The response carries one rule, so without this

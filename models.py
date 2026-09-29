@@ -76,6 +76,24 @@ class SlotRowIn(BaseModel):
     outermost_meters: float = 0.0  # centre to the far end of the outermost slot
 
 
+class SeatGapIn(BaseModel):
+    """How far a part seated in the hanger's slots sits from the glass's LEFT and RIGHT edges —
+    now, and as the product was BUILT (measured by the app on the fresh working copy at Connect,
+    before anything was written).
+
+    The hanging bracket's tabs drop into slots near the hanger's ends, so its width is always the
+    hanger's minus a fixed inset and cannot be set on its own. Keeping it at least as far from the
+    sides as it was built is therefore a limit on the HANGER. Live 2026-09-29, SUZI 44x56: #1215
+    (40") was chosen, the bracket followed it to 39.125" and ran into the chassis corner and the
+    LED strip, which sit 2.5" in from the glass edge.
+    """
+    component: str = ""
+    left_meters: float = 0.0
+    right_meters: float = 0.0
+    built_left_meters: float = 0.0
+    built_right_meters: float = 0.0
+
+
 class InterpretRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     instruction: str
@@ -115,6 +133,21 @@ class InterpretRequest(BaseModel):
     shape: str = "rect"
     master_radial: int = 0
     radial_dims: dict[str, int] = {}
+
+    # ── HALF-FRAME parts ─────────────────────────────────────────────────────────
+    # Dims on a part that runs from the glass's CENTRE LINE out to ONE edge on that axis, as
+    # the app measured it off the component's box and origin. Such a part's far edge follows
+    # the glass edge, which moves HALF the master delta, so it takes half — the RADIUS rule on a
+    # rectangle. SUZI (2026-09-29) builds its chassis corner frame from two of them,
+    # `12473-CHASSIS CORNERA` twice with one turned 180°: each is 15.500" of the 36" glass (43%),
+    # the frame-spanning bar skipped it as a fixed profile, the corners never grew in height, and
+    # the LED strip drawn in context off their edges stayed the same size with them.
+    # Empty from an older app, which keeps the old behaviour.
+    half_frame_dims: list[str] = []
+    # Parts seated in the hanger's slots, with their distance from the glass edges now and as
+    # built. Caps the hanger so its bracket never ends up closer to the sides than it was built.
+    # Empty from an older app: no cap, the old behaviour.
+    seat_gaps: list[SeatGapIn] = []
 
     # ── CURVED mirrors that are not discs (obround, ellipse) ────────────────────
     # `shape` now also carries "obround" and "ellipse", measured by the app as a part's real area

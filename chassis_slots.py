@@ -62,6 +62,25 @@ CHASSIS_SLOTS: tuple[SlotSpec, ...] = ()
 
 MIN_GAP_IN = 0.25   # smallest gap left between slots (0 would sit exactly on the limit)
 
+# A mounting slot is LONG AND THIN: every real one measured is 3.5x to 27x its own width (AMBER
+# 7.500 / 0.280, SUZI's chassis 6.000 / 0.280, CAPSULE 4.000 / 0.280). The app's row finder also
+# reports rows of small holes and cut-outs, which are the same shape (two equal contours on one
+# line) but as long as they are wide, and lengthening one turns a hole into a slot.
+#
+# Live 2026-09-29, SUZI 24x36 -> 44x56: `D1@Sketch20` on `12473-CHASSIS CORNERA` is a pair of
+# 0.250 x 0.250" cut-outs 0.125" in from the part's edge. Scaled with the part width to 0.500"
+# they cut into the edges the LED strip's in-context sketch and the Distance2 / Distance11 mates
+# are pinned to, and all three failed. Proven by a non-saving trial on the model: 0.250" and
+# 0.375" resolve, 0.500" breaks all three. `.145 THRU HOLES FOR DIMPLES` on the hanging bracket
+# (0.145 x 0.145") is the same shape and would have been next.
+MIN_SLOT_ELONGATION = 2.0
+
+
+def is_hole_row(row) -> bool:
+    """True for a measured row whose contours are not elongated - holes, not slots."""
+    return (row is not None and getattr(row, "slot_width_meters", 0.0) > 0
+            and row.length_meters < MIN_SLOT_ELONGATION * row.slot_width_meters)
+
 
 def spec_from_measurement(row) -> SlotSpec | None:
     """Build a spec from a `SlotRowIn` the app measured off the live model.
@@ -69,8 +88,12 @@ def spec_from_measurement(row) -> SlotSpec | None:
     The gauge term is folded into the measurement: the app reports the part's real bounding-box
     width, so no sheet-thickness correction is needed here — that was only ever a way of turning a
     sketch dim into a body width when both were hard-coded.
+
+    None for a row of HOLES (`is_hole_row`): it keeps its as-drawn size at every width.
     """
     if row is None or row.count < 2 or row.length_meters <= 0:
+        return None
+    if is_hole_row(row):
         return None
     return SlotSpec(
         part=row.component or "measured",
