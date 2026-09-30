@@ -33,11 +33,10 @@ except ImportError:
 import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest, DrawingPlanRequest, DrawingPlanResponse
+from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest
 from pydantic import BaseModel, ConfigDict
 from interpret import interpret as run_interpret
 from generate_rules import generate_rules as run_generate_rules
-from generate_drawing_plan import generate_drawing_plan as run_drawing_plan
 import cloud_sync
 import rules_store as store
 from log import log, section
@@ -94,11 +93,6 @@ async def interpret_endpoint(req: InterpretRequest) -> InterpretResponse:
 @app.post("/generate-rules", response_model=GenerateRulesResponse)
 async def generate_rules_endpoint(req: GenerateRulesRequest) -> GenerateRulesResponse:
     return await run_generate_rules(req)
-
-
-@app.post("/drawing-plan", response_model=DrawingPlanResponse)
-async def drawing_plan_endpoint(req: DrawingPlanRequest) -> DrawingPlanResponse:
-    return await run_drawing_plan(req)
 
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)

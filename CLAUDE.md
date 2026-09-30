@@ -9,7 +9,7 @@
 
 The Python/FastAPI brain of the SolidWorks CAD automation tool. It receives a model snapshot
 (dimensions, axis labels, assembly context) plus a natural-language instruction and returns a
-flat list of `(dimension_name, new_value_meters)` pairs — or a rules file, or a drawing plan.
+flat list of `(dimension_name, new_value_meters)` pairs — or a rules file.
 
 **No SolidWorks dependency.** Every COM operation lives in the companion .NET app; this side is
 pure text/JSON and fully unit-testable.
@@ -38,10 +38,9 @@ ai-engine/
 ├── rules.py                # load rules JSON; expand_positions / expand_offsets; validate
 ├── hanger_select.py        # prefab-hanger selection by glass AREA (+ height cap)
 ├── generate_rules.py       # /generate-rules: LLM grouping → deterministic axis enforcement
-├── generate_drawing_plan.py# /drawing-plan: English → fixed verb vocabulary
 ├── rules_store.py          # WHERE rules live + WHICH set applies (family keying)
 ├── cloud_sync.py           # optional Supabase mirror (off by default)
-├── prompts.py              # the four system prompts
+├── prompts.py              # the two rules system prompts
 ├── llm.py                  # streaming Claude + OpenAI clients, call_llm() router
 ├── models.py               # all pydantic request/response schemas
 ├── log.py                  # ai-engine.log writer (log / section)
@@ -55,9 +54,11 @@ ai-engine/
 └── start.bat               # venv + uvicorn on :8000
 ```
 
-`generate_drawing.py` is **dead code** — it imports `DrawingRequest`/`DrawingRecipe`, which no
-longer exist in `models.py`, and nothing imports it. The live drawing path is
-`generate_drawing_plan.py`. Delete it or restore the models; don't extend it as-is.
+**The engine has no drawing path.** Production drawings are built entirely by the app
+(`GenerateProductionDrawings` → `ProductionDrawingSpec` → `BuildOneDrawing`), deterministically
+and with no LLM. Both AI drawing generations — `generate_drawing.py` (recipe) and
+`generate_drawing_plan.py` (verb vocabulary, `/drawing-plan`) — were removed. Don't reintroduce
+an engine-side drawing endpoint.
 
 `main.py` resolves `.env` next to `sys.executable` when frozen, so the client can edit it beside
 `ai-engine.exe`. Preserve that when touching path logic.
@@ -229,7 +230,6 @@ edit.** The frozen exe never reloads.
 | `POST /generate-rules` | assembly context → proposed width/height rules + `skip` + `component_labels` (the app reviews before saving) |
 | `GET /get-rules?model_path=` | pull the family from the cloud (best-effort), then return the selected set + `model_key`/`source` |
 | `POST /save-rules` | write the family's set to the data dir and push it; **preserves** `pattern_rules`/`position`/`offset` when the caller omits them (a form that doesn't edit a section can't wipe it) — but deliberately drops any legacy `depth` block |
-| `POST /drawing-plan` | English → validated drawing verb list |
 
 `InterpretRequest` carries `instruction`, `dimensions[]`, `assembly_context`,
 `model_path` (used to locate the rules file), `dim_axis_labels` (`W`/`H`/`D`/`?`, computed by the
@@ -490,18 +490,6 @@ never a substitute for a stored set: no limits, component labels, offsets or pos
 Rules-file shape: `width`/`height` (`if_changes` + `also_change`), `component_labels`, `limits`,
 `pattern_rules` (component multiplication — stored and forwarded only; the app applies them),
 `position`, `offset`.
-
----
-
-## `/drawing-plan`
-
-`drawing_plan_prompt` translates English into ops from a fixed vocabulary, re-validated here
-against `ALLOWED_VERBS` so a hallucinated verb never reaches the app: `create_view`, `set_units`,
-`set_sheet`, `overall_dimensions`, `auto_dimension` (back-compat alias), `fill_title_block`,
-`add_notes`, `export_pdf`. **The AI never emits a scale, coordinate or view position** — the app
-measures the model and lays the sheet out. Labelling is opt-in: plain "production drawing" means
-views only. Unsupported extras (hole table, BOM, section views, GD&T) are silently omitted and
-noted in `explanation` rather than failing.
 
 ---
 

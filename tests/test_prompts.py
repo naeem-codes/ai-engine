@@ -15,6 +15,13 @@ def test_no_classification_prompt_survives():
     assert not hasattr(prompts, "classification_prompt")
 
 
+def test_no_drawing_prompt_survives():
+    """Production drawings are built by the app, deterministically. The engine has no drawing
+    path: both AI generations (drawing_prompt/recipe and drawing_plan_prompt/verbs) are gone."""
+    assert not hasattr(prompts, "drawing_prompt")
+    assert not hasattr(prompts, "drawing_plan_prompt")
+
+
 def test_rules_dependent_prompt_carries_the_rules_and_masters():
     prompt = rules_dependent_prompt(
         '{"width": [{"if_changes": "WIDTH@Mirror", "also_change": ["LED_WIDTH@LED"]}]}',
