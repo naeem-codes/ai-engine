@@ -1,5 +1,10 @@
 # CLAUDE.md — ai-engine (Lumi Design AI Engine)
 
+> **Project tracking lives in the app folder** — `C:\Users\a\Desktop\Prototype Copy\Auto CAD version 5 Part 3\AutoCAD\SolidWorksAI\`:
+> `CLAUDE.md` (permanent laws for both halves), `progress.md` (current work), `issues.md` (every bug,
+> cause and fix, engine ones included). Update those in the same turn as any engine fix. This file
+> covers Python internals only; if it disagrees with the app CLAUDE.md laws, the app file wins.
+
 ## What this is
 
 The Python/FastAPI brain of the SolidWorks CAD automation tool. It receives a model snapshot
