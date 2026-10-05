@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from hanger_select import (MAX_AREA_FRACTION, MAX_HEIGHT_FRACTION, MIN_ACCEPTABLE_FRACTION,
+from engine.hangers.hanger_select import (MAX_AREA_FRACTION, MAX_HEIGHT_FRACTION, MIN_ACCEPTABLE_FRACTION,
                            MIN_WIDTH_FRACTION, PREFAB_HANGERS, REVIEW_BELOW_FRACTION,
                            TARGET_AREA_FRACTION, TARGET_WIDTH_FRACTION, select_hanger,
                            select_hanger_meters)

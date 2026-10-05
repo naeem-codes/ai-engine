@@ -21,11 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import chassis_slots
-from chassis_slots import (SlotSpec, max_length_in, slot_length_for,
+from engine.resize import chassis_slots
+from engine.resize.chassis_slots import (SlotSpec, max_length_in, slot_length_for,
                            spec_from_measurement)
-from interpret import _slot_follower_updates
-from models import DimensionChange, DimensionIn, InterpretRequest, SlotRowIn
+from engine.resize.interpret import _slot_follower_updates
+from engine.core.models import DimensionChange, DimensionIn, InterpretRequest, SlotRowIn
 
 IN = 0.0254
 

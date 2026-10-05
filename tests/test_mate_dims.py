@@ -15,10 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import resize_policy as policy
-import rules
-from interpret import interpret
-from models import DimensionIn, InterpretRequest
+from engine.resize import resize_policy as policy
+from engine.rules import rules
+from engine.resize.interpret import interpret
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 GLASS_W = "D1@Sketch1 [SUZI-MIRROR-1]"
@@ -90,7 +90,7 @@ async def test_stale_rule_listing_a_mate_is_ignored_at_runtime(rules_dir):
     dims = {GLASS_W: 24 * IN, MATE: 18 * IN, CHASSIS: 23.75 * IN}
     llm = json.dumps({"rule": {"if_changes": GLASS_W, "also_change": [MATE, CHASSIS]},
                       "value_meters": 30 * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         res = await interpret(InterpretRequest(
             instruction="change width to 30",
             dimensions=[DimensionIn(name=n, value_meters=v) for n, v in dims.items()],

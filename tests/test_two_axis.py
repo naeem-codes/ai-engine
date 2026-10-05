@@ -15,9 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import rules
-from interpret import interpret
-from models import DimensionIn, InterpretRequest
+from engine.rules import rules
+from engine.resize.interpret import interpret
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 MIRROR_W = "WIDTH@Sketch1 [1011-MIRROR-CAROL-1]"
@@ -39,13 +39,13 @@ def rules_dir(tmp_path, monkeypatch):
     }
     (tmp_path / "TwoAxis.rules.json").write_text(json.dumps(doc))
     monkeypatch.setattr(rules, "RULES_DIR", tmp_path, raising=False)
-    import rules_store
+    from engine.rules import rules_store
     monkeypatch.setattr(rules_store, "RULES_DIR", tmp_path, raising=False)
     return tmp_path
 
 
 async def _run(rules_dir, llm_payload, dims=None):
-    with patch("interpret.call_llm", new=AsyncMock(return_value=json.dumps(llm_payload))):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=json.dumps(llm_payload))):
         return await interpret(InterpretRequest(
             instruction="change to 24 x 36",
             dimensions=[DimensionIn(name=n, value_meters=v)

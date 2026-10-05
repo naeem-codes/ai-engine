@@ -16,12 +16,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import chassis_slots
-import interpret
-import rules
-from hanger_select import select_hanger
-from models import DimensionIn, InterpretRequest, SeatGapIn, SlotRowIn
-from interpret import interpret as run_interpret
+from engine.resize import chassis_slots
+from engine.resize import interpret
+from engine.rules import rules
+from engine.hangers.hanger_select import select_hanger
+from engine.core.models import DimensionIn, InterpretRequest, SeatGapIn, SlotRowIn
+from engine.resize.interpret import interpret as run_interpret
 
 IN = 0.0254
 
@@ -117,7 +117,7 @@ async def test_end_to_end_the_bracket_keeps_its_distance_from_the_sides(suzi_rul
             HANGER_W: 14.25, HANGER_H: 16, BRACKET_W: 13.375}
     llm = json.dumps({"rule": {"if_changes": MIRROR_W, "also_change": [CHASSIS_W, BRACKET_W]},
                       "value_meters": 44 * IN, "other_axis_meters": 56 * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         res = await run_interpret(InterpretRequest(
             instruction="Resize to 44 x 56",
             dimensions=[DimensionIn(name=n, value_meters=v * IN) for n, v in dims.items()],
@@ -169,7 +169,7 @@ def test_the_corner_cutouts_are_not_lengthened_on_resize():
         slot_rows=[_row(0.25, 0.25),
                    _row(6.0, 0.28, dim=chassis_slot, comp="12476-CHASSIS-5", part_w=23.75,
                         inset=4.235)])
-    from models import DimensionChange
+    from engine.core.models import DimensionChange
     out = {d: v for d, v, _cur in interpret._slot_follower_updates(
         req, [DimensionChange(name=corner_w, value_meters=39.0 * IN),
               DimensionChange(name=CHASSIS_W, value_meters=43.75 * IN)])}

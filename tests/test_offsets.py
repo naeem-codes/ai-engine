@@ -3,10 +3,10 @@ import json
 import pytest
 from unittest.mock import patch, AsyncMock
 
-import rules
-from rules import ModelRules, OffsetRuleEntry, expand_offsets
-from models import InterpretRequest, DimensionIn
-from interpret import interpret
+from engine.rules import rules
+from engine.rules.rules import ModelRules, OffsetRuleEntry, expand_offsets
+from engine.core.models import InterpretRequest, DimensionIn
+from engine.resize.interpret import interpret
 
 
 def _mr(offsets):
@@ -89,7 +89,7 @@ async def test_interpret_appends_offset_change(offset_rules_dir):
         "rule": {"if_changes": "WIDTH@Mirror", "also_change": ["CHASSIS_W@Chassis"]},
         "value_meters": 0.762,   # grow to 30 in
     })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="make it 30 inches wide",
             dimensions=dims,

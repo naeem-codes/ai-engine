@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hanger_select import select_hanger
+from engine.hangers.hanger_select import select_hanger
 
 # ECLIPSE-30 as drawn, all measured off the model.
 FIT_W, FIT_H = 14.25, 10.00
@@ -72,7 +72,7 @@ def test_it_holds_the_drawn_fraction_at_every_size():
     """Proportional, then snapped to the 0.25" manufacturing increment — a resized hanger has to
     be cut, so 21.500" beats 21.375". That snap is the only thing between the result and the exact
     fraction, and it is half a step at worst."""
-    from hanger_select import RESIZE_ROUND_TO_IN
+    from engine.hangers.hanger_select import RESIZE_ROUND_TO_IN
     for dia in (24, 36, 45, 60):
         c = _pick(dia, FIT_W, FIT_H, 30)
         if not c.resize_fitted:

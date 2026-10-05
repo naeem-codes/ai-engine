@@ -36,10 +36,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import generate_rules
-import hanger_select
-import interpret
-import models
+from engine.rules import generate_rules
+from engine.hangers import hanger_select
+from engine.resize import interpret
+from engine.core import models
 
 IN = 0.0254
 

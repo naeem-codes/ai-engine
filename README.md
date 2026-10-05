@@ -180,16 +180,16 @@ docker run -p 8000:8000 \
 
 ```
 ai-engine/
-├── main.py          # FastAPI app — /interpret and /health endpoints
-├── interpret.py     # Orchestration — decides which case applies
-├── prompts.py       # LLM system prompt templates
-├── llm.py           # Claude / OpenAI HTTP clients
-├── rules.py         # Rules engine — loads .rules.json, validates, expands
-├── models.py        # Pydantic request/response schemas
-├── rules/           # .rules.json files (one per SolidWorks model)
+├── main.py          # Entry point: FastAPI app and all endpoints
+├── engine/
+│   ├── core/        # models (request/response schemas), outline, log
+│   ├── resize/      # interpret (resize orchestration), resize_policy, chassis_slots
+│   ├── hangers/     # hanger_select (prefab hanger choice)
+│   ├── rules/       # rules, generate_rules, rules_store, cloud_sync
+│   └── llm/         # llm (Claude / OpenAI clients), prompts
+├── rules/           # legacy .rules.json location (migrated on startup)
 ├── tests/           # pytest test suite (LLM mocked)
 ├── .env.example     # Config template
 ├── requirements.txt
-├── Dockerfile
-└── start.bat        # Windows one-click launcher
+└── Dockerfile
 ```

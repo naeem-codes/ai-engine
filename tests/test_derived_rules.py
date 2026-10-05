@@ -17,10 +17,10 @@ import json
 import pytest
 from unittest.mock import patch, AsyncMock
 
-import rules_store as store
-from models import DimensionIn, InterpretRequest
-from interpret import interpret
-from rules import derive_rules
+from engine.rules import rules_store as store
+from engine.core.models import DimensionIn, InterpretRequest
+from engine.resize.interpret import interpret
+from engine.rules.rules import derive_rules
 
 MIRROR_W = "WIDTH@Sketch1 [1021-MIRROR-1]"
 MIRROR_H = "HEIGHT@Sketch1 [1021-MIRROR-1]"
@@ -91,7 +91,7 @@ async def test_labels_alone_no_longer_authorise_a_resize():
     llm = json.dumps({"target_width_meters": 0.762, "width_dims": [MIRROR_W],
                       "target_height_meters": None, "height_dims": [],
                       "explanation": "Overall resize"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         result = await interpret(InterpretRequest(
             instruction="change width to 30 inches",
             dimensions=DIMS,
@@ -115,7 +115,7 @@ async def test_naming_a_component_does_not_bypass_the_gate():
     llm = json.dumps({"target_width_meters": 0.762, "master_width_dim": CHASSIS_W,
                       "width_dims": [CHASSIS_W], "target_height_meters": None,
                       "height_dims": [], "explanation": "Chassis and mated parts"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         result = await interpret(InterpretRequest(
             instruction="make the chassis wider",
             dimensions=DIMS,
@@ -138,7 +138,7 @@ async def test_a_stored_family_set_is_used_for_any_size_of_the_family():
     })
     llm = ('{"rule": {"if_changes": "' + MIRROR_W + '", "also_change": ["' + CHASSIS_W + '"]},'
            ' "scope": "overall", "value_meters": 0.762}')
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         result = await interpret(InterpretRequest(
             instruction="change width to 30 inches",
             dimensions=DIMS,

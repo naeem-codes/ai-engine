@@ -34,8 +34,8 @@ from typing import NamedTuple
 
 import httpx
 
-import rules_store as store
-from log import log
+from engine.rules import rules_store as store
+from engine.core.log import log
 
 TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 TABLE = "rules"

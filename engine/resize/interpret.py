@@ -1,18 +1,18 @@
 import json
 import math
-import chassis_slots
-import hanger_select
-import outline
-import resize_policy as policy
-import rules_store as store
-from hanger_select import select_hanger_meters
-from models import (InterpretRequest, DimensionChange, HangerSelection,
+from engine.resize import chassis_slots
+from engine.hangers import hanger_select
+from engine.core import outline
+from engine.resize import resize_policy as policy
+from engine.rules import rules_store as store
+from engine.hangers.hanger_select import select_hanger_meters
+from engine.core.models import (InterpretRequest, DimensionChange, HangerSelection,
                     InterpretResponse)
-from rules import (load_rules, parse_rules, validate,
+from engine.rules.rules import (load_rules, parse_rules, validate,
                    expand_positions, expand_offsets)
-from llm import call_llm
-from prompts import rules_dependent_prompt
-from log import log, section
+from engine.llm.llm import call_llm
+from engine.llm.prompts import rules_dependent_prompt
+from engine.core.log import log, section
 
 
 def _strip_fences(text: str) -> str:

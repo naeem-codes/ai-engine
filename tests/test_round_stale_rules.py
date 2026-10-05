@@ -18,8 +18,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from interpret import _round_circles_left_behind
-from models import DimensionIn, InterpretRequest
+from engine.resize.interpret import _round_circles_left_behind
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 GLASS = "D1@Sketch1 [1026-MIRROR-ECLIPSE-1]"

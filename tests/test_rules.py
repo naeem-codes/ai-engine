@@ -1,7 +1,7 @@
 import json
 import pytest
 from pathlib import Path
-import rules
+from engine.rules import rules
 
 
 FIXTURE = Path(__file__).parent / "fixture.rules.json"

@@ -15,9 +15,9 @@ follows the glass edge, which moves HALF the master delta.
 
 import pytest
 
-import interpret
-from models import InterpretRequest
-from rules import ModelRules, RulePairEntry
+from engine.resize import interpret
+from engine.core.models import InterpretRequest
+from engine.rules.rules import ModelRules, RulePairEntry
 
 IN = 0.0254
 GLASS_W, GLASS_H = 24 * IN, 36 * IN

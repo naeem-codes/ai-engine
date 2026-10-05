@@ -31,11 +31,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import generate_rules
-import hanger_select
-import interpret
-import models
-import rules
+from engine.rules import generate_rules
+from engine.hangers import hanger_select
+from engine.resize import interpret
+from engine.core import models
+from engine.rules import rules
 
 IN = 0.0254
 
@@ -396,7 +396,7 @@ def amy_rules(tmp_path, monkeypatch, request):
 async def _resize(root, master, also, target_in):
     llm = json.dumps({"rule": {"if_changes": master, "also_change": [also]},
                       "value_meters": target_in * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         return await interpret.interpret(models.InterpretRequest(
             instruction=f"resize to {target_in}",
             dimensions=[models.DimensionIn(name=n, value_meters=v) for n, v in AMY_24X48.items()],

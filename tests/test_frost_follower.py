@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import rules
-from interpret import interpret
-from models import DimensionIn, InterpretRequest
+from engine.rules import rules
+from engine.resize.interpret import interpret
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 GLASS_W = "D1@Sketch1 [AMY-24.00X48]"          # 24.000" outer width — master
@@ -52,7 +52,7 @@ def rules_dir(tmp_path, monkeypatch):
 async def _resize(rules_dir, target_in, dims=None):
     llm = json.dumps({"rule": {"if_changes": GLASS_W, "also_change": [CHASSIS_W, STRIP]},
                       "value_meters": target_in * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         return await interpret(InterpretRequest(
             instruction=f"change width to {target_in}",
             dimensions=[DimensionIn(name=n, value_meters=v) for n, v in (dims or DIMS).items()],

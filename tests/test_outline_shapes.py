@@ -30,9 +30,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import outline
-from interpret import _mate_position_updates, _row_headroom, _tab_dim_in_row, _tab_row
-from models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn, SlotRowIn
+from engine.core import outline
+from engine.resize.interpret import _mate_position_updates, _row_headroom, _tab_dim_in_row, _tab_row
+from engine.core.models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn, SlotRowIn
 
 IN = 0.0254
 

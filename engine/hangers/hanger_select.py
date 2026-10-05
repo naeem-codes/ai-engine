@@ -33,7 +33,7 @@ the AMBER hanger's bounding box is 20.000" wide x 15.000" tall, matching legend 
 import math
 from dataclasses import dataclass, field
 
-import resize_policy as policy
+from engine.resize import resize_policy as policy
 
 # The HANGER LEGEND sheet. (part number, width_in, height_in) — see
 # memory reference_hanger_prefab_legend for the source photo.

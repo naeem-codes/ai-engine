@@ -6,8 +6,8 @@ LLM-classification fallback — a resize now REQUIRES a rule set, so there is no
 "figure the scope and the dim list out yourself".
 """
 
-import prompts
-from prompts import rules_dependent_prompt, rules_system_prompt
+from engine.llm import prompts
+from engine.llm.prompts import rules_dependent_prompt, rules_system_prompt
 
 
 def test_no_classification_prompt_survives():

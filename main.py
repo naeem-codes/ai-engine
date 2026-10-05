@@ -33,13 +33,13 @@ except ImportError:
 import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest
+from engine.core.models import InterpretRequest, InterpretResponse, GenerateRulesRequest, GenerateRulesResponse, SaveRulesRequest
 from pydantic import BaseModel, ConfigDict
-from interpret import interpret as run_interpret
-from generate_rules import generate_rules as run_generate_rules
-import cloud_sync
-import rules_store as store
-from log import log, section
+from engine.resize.interpret import interpret as run_interpret
+from engine.rules.generate_rules import generate_rules as run_generate_rules
+from engine.rules import cloud_sync
+from engine.rules import rules_store as store
+from engine.core.log import log, section
 
 # Legacy per-stem location (next to the exe). Still read once by store.bootstrap() so an
 # existing install migrates itself; the LIVE location is store.data_dir().
@@ -97,7 +97,7 @@ async def generate_rules_endpoint(req: GenerateRulesRequest) -> GenerateRulesRes
 
 @app.get("/get-rules", response_model=GenerateRulesResponse)
 async def get_rules_endpoint(model_path: str) -> GenerateRulesResponse:
-    from models import RulePair, PositionRule, OffsetRule
+    from engine.core.models import RulePair, PositionRule, OffsetRule
     # The app calls this on every Refresh, i.e. right before any prompt — so it is the natural
     # sync point. Best-effort: a failed pull just leaves the local cache in place.
     await cloud_sync.pull_family(model_path)

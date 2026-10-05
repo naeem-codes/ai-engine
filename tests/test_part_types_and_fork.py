@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import resize_policy as policy
-import rules_store as store
+from engine.resize import resize_policy as policy
+from engine.rules import rules_store as store
 
 
 # ── declared PartType beats the keyword guess ────────────────────────────────

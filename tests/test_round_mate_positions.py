@@ -22,8 +22,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from interpret import _mate_position_updates
-from models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn
+from engine.resize.interpret import _mate_position_updates
+from engine.core.models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn
 
 IN = 0.0254
 GLASS = "D1@Sketch1 [1026-MIRROR-ECLIPSE-1]"
@@ -226,7 +226,7 @@ def test_a_radius_master_scales_from_the_radius_not_the_diameter():
 # Reported live 2026-09-14: the disc rule put them at 8.812" while the stretched hanger's slots
 # had gone out to 13.375".
 
-from models import HangerSelection                                       # noqa: E402
+from engine.core.models import HangerSelection                                       # noqa: E402
 
 HW = "D2@Base-Flange1 [1004-HANGER-1]"
 HH = "D1@Sketch1 [1004-HANGER-1]"

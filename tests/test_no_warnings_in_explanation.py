@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import interpret
-import rules
-from models import DimensionIn, HangerSelection, InterpretRequest
+from engine.resize import interpret
+from engine.rules import rules
+from engine.core.models import DimensionIn, HangerSelection, InterpretRequest
 
 IN = 0.0254
 GLASS = "D1@Sketch1 [1026-MIRROR-ECLIPSE-1]"
@@ -46,8 +46,8 @@ async def test_a_stale_round_rule_set_warns_in_the_LOG_not_the_explanation(stale
     logged = []
     llm = json.dumps({"rule": {"if_changes": GLASS, "also_change": [CHASSIS]},
                       "value_meters": 45 * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)), \
-            patch("interpret.log", new=lambda msg, *a, **k: logged.append(str(msg))):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)), \
+            patch("engine.resize.interpret.log", new=lambda msg, *a, **k: logged.append(str(msg))):
         res = await interpret.interpret(InterpretRequest(
             instruction="Resize to 45",
             dimensions=[DimensionIn(name=n, value_meters=v) for n, v in DIMS.items()],
@@ -67,7 +67,7 @@ def test_the_hanger_band_remarks_are_logged_not_shown():
     logged = []
     for flags in ({"needs_review": True}, {"over_ceiling": True}, {"under_target": True}):
         sel = HangerSelection(part="1119", part_name="1119-HANGER", fraction=0.1855, **flags)
-        with patch("interpret.log", new=lambda msg, *a, **k: logged.append(str(msg))):
+        with patch("engine.resize.interpret.log", new=lambda msg, *a, **k: logged.append(str(msg))):
             note = interpret._hanger_note(sel)
         assert note == " Hanger to be replaced with prefab #1119 (18.55% of the glass)."
     assert len([l for l in logged if "[WARN]" in l]) == 3

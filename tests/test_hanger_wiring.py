@@ -19,10 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import rules
-from hanger_select import OBSTACLE_CLEARANCE_IN, select_hanger
-from interpret import interpret
-from models import DimensionIn, InterpretRequest
+from engine.rules import rules
+from engine.hangers.hanger_select import OBSTACLE_CLEARANCE_IN, select_hanger
+from engine.resize.interpret import interpret
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 MIRROR_W = "WIDTH@Sketch1 [1011-MIRROR-CAROL-1]"
@@ -74,7 +74,7 @@ async def _resize(rules_dir, if_changes, target_in, dims=None, axis=None, also=N
         "value_meters": target_in * IN,
         "scope": "overall",
     })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         return await interpret(InterpretRequest(
             instruction=f"resize to {target_in}",
             dimensions=[DimensionIn(name=n, value_meters=v)
@@ -195,7 +195,7 @@ async def test_every_hanger_write_is_a_catalogue_or_clean_custom_size(rules_dir,
     """A prefab write must be an EXACT catalogue size. When no prefab qualifies and the fitted
     hanger is resized instead, the value is computed — but must still be a clean 0.25"
     increment, since someone has to make that part."""
-    from hanger_select import PREFAB_HANGERS, RESIZE_ROUND_TO_IN
+    from engine.hangers.hanger_select import PREFAB_HANGERS, RESIZE_ROUND_TO_IN
     widths = {round(w, 4) for _p, w, _h in PREFAB_HANGERS}
     heights = {round(h, 4) for _p, _w, h in PREFAB_HANGERS}
     res = await _resize(rules_dir, MIRROR_H, target_in)
@@ -305,7 +305,7 @@ async def test_duplicated_dim_dump_yields_one_follower_change(rules_dir):
         "scope": "overall",
     })
     doubled = [DimensionIn(name=n, value_meters=v) for n, v in DIMS.items() for _ in range(2)]
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         res = await interpret(InterpretRequest(
             instruction="resize to 48",
             dimensions=doubled,
@@ -459,7 +459,7 @@ async def _isa_resize(rules_dir, dims, target_in):
     llm = json.dumps({
         "rule": {"if_changes": ISA_MIRROR_W, "also_change": [ISA_CHASSIS_W, ISA_BRACKET_W]},
         "value_meters": target_in * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         return await interpret(InterpretRequest(
             instruction=f"resize to {target_in}",
             dimensions=[DimensionIn(name=n, value_meters=v) for n, v in dims.items()],

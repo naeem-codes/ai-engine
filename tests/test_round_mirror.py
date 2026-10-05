@@ -17,13 +17,13 @@ import math
 
 import pytest
 
-import interpret
-import resize_policy as policy
-import rules_store
-from hanger_select import select_hanger
-from models import InterpretRequest
-from prompts import rules_dependent_prompt
-from rules import ModelRules, RulePairEntry
+from engine.resize import interpret
+from engine.resize import resize_policy as policy
+from engine.rules import rules_store
+from engine.hangers.hanger_select import select_hanger
+from engine.core.models import InterpretRequest
+from engine.llm.prompts import rules_dependent_prompt
+from engine.rules.rules import ModelRules, RulePairEntry
 
 IN = 0.0254
 GLASS = 0.762          # 30.000" diameter

@@ -13,8 +13,8 @@ import json
 import httpx
 import pytest
 
-import cloud_sync
-import rules_store as store
+from engine.rules import cloud_sync
+from engine.rules import rules_store as store
 
 
 def _jwt(client_id: str = "acme", **extra) -> str:

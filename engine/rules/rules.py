@@ -4,14 +4,15 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from log import log
-from resize_policy import filter_axis_dims, pick_master
+from engine.core.log import log
+from engine.resize.resize_policy import filter_axis_dims, pick_master
 
-# Resolve rules/ next to engine.exe when frozen (PyInstaller), else next to this file.
+# Resolve rules/ next to engine.exe when frozen (PyInstaller), else in the engine root
+# (this file is engine/rules/rules.py, so the root is parents[2]).
 if getattr(sys, "frozen", False):
     RULES_DIR = Path(sys.executable).parent / "rules"
 else:
-    RULES_DIR = Path(__file__).parent / "rules"
+    RULES_DIR = Path(__file__).resolve().parents[2] / "rules"
 
 
 @dataclass

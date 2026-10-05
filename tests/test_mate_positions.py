@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from interpret import _mate_position_updates
-from models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn
+from engine.resize.interpret import _mate_position_updates
+from engine.core.models import DimensionChange, DimensionIn, InterpretRequest, MatePositionIn
 
 IN = 0.0254
 MIRROR_W = "WIDTH@Sketch1 [1011-MIRROR-CAROL-1]"

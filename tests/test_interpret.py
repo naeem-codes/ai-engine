@@ -3,10 +3,10 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
-import rules
-import rules_store as store
-from models import InterpretRequest, DimensionIn
-from interpret import interpret
+from engine.rules import rules
+from engine.rules import rules_store as store
+from engine.core.models import InterpretRequest, DimensionIn
+from engine.resize.interpret import interpret
 
 FIXTURE = Path(__file__).parent / "fixture.rules.json"
 
@@ -40,7 +40,7 @@ def base_dims():
 @pytest.mark.asyncio
 async def test_rules_trigger_expands_correctly(rules_dir, base_dims):
     llm_json = '{"trigger": "width", "value_meters": 0.762, "explanation": "30 inches"}'
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="set width to 30 inches",
             dimensions=base_dims,
@@ -57,7 +57,7 @@ async def test_rules_trigger_expands_correctly(rules_dir, base_dims):
 @pytest.mark.asyncio
 async def test_rules_trigger_blocked_by_limit(rules_dir, base_dims):
     llm_json = '{"trigger": "width", "value_meters": 0.05}'
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="set width to 2 inches",
             dimensions=base_dims,
@@ -71,7 +71,7 @@ async def test_rules_trigger_blocked_by_limit(rules_dir, base_dims):
 @pytest.mark.asyncio
 async def test_rules_error_from_llm(rules_dir, base_dims):
     llm_json = '{"error": "unclear instruction"}'
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="do something",
             dimensions=base_dims,
@@ -82,7 +82,7 @@ async def test_rules_error_from_llm(rules_dir, base_dims):
 
 @pytest.mark.asyncio
 async def test_rules_malformed_json_returns_error(rules_dir, base_dims):
-    with patch("interpret.call_llm", new=AsyncMock(return_value="not valid json {")):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value="not valid json {")):
         result = await interpret(InterpretRequest(
             instruction="set width to 30 inches",
             dimensions=base_dims,
@@ -95,7 +95,7 @@ async def test_rules_malformed_json_returns_error(rules_dir, base_dims):
 @pytest.mark.asyncio
 async def test_rules_direct_changes_path(rules_dir, base_dims):
     llm_json = '{"changes": [{"dimension": "WIDTH@Mirror", "value_meters": 0.5}], "explanation": "direct"}'
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="set WIDTH@Mirror to 500mm",
             dimensions=base_dims,
@@ -115,7 +115,7 @@ async def test_rules_direct_changes_path(rules_dir, base_dims):
 @pytest.mark.asyncio
 async def test_no_rules_is_refused(base_dims):
     llm = AsyncMock(return_value="{}")
-    with patch("interpret.call_llm", new=llm):
+    with patch("engine.resize.interpret.call_llm", new=llm):
         result = await interpret(InterpretRequest(
             instruction="set width to 30 inches",
             dimensions=base_dims,
@@ -133,7 +133,7 @@ async def test_no_rules_is_refused(base_dims):
 
 @pytest.mark.asyncio
 async def test_no_rules_refusal_names_the_model(base_dims):
-    with patch("interpret.call_llm", new=AsyncMock(return_value="{}")):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value="{}")):
         result = await interpret(InterpretRequest(
             instruction="resize to 40 x 40 inches",
             dimensions=base_dims,
@@ -152,7 +152,7 @@ async def test_rules_path_does_not_set_needs_rules(base_dims):
         "width": [{"if_changes": "WIDTH@Mirror", "also_change": ["LED_WIDTH@LED"]}],
         "height": [],
     })
-    with patch("interpret.call_llm", new=AsyncMock(return_value='{"error": "unclear"}')):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value='{"error": "unclear"}')):
         result = await interpret(InterpretRequest(
             instruction="do something",
             dimensions=base_dims,

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-import rules_store as store
+from engine.rules import rules_store as store
 
 
 def _doc(master="D1@Sketch1 [MIRROR-1]", deps=(), **extra):

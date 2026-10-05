@@ -36,8 +36,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from log import log
-from resize_policy import component_of
+from engine.core.log import log
+from engine.resize.resize_policy import component_of
 
 RULES_SUFFIX = ".rules.json"
 
@@ -45,8 +45,9 @@ RULES_SUFFIX = ".rules.json"
 # ── locations ─────────────────────────────────────────────────────────────────
 
 def _bundle_dir() -> Path:
-    """Folder of `ai-engine.exe` when frozen (PyInstaller), else of this source file."""
-    return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+    """Folder of `ai-engine.exe` when frozen (PyInstaller), else the engine root (this file is
+    engine/rules/rules_store.py, so the root is parents[2])."""
+    return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
 
 
 def data_dir() -> Path:

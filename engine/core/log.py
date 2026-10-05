@@ -1,7 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
-_LOG = Path(__file__).parent / "ai-engine.log"
+# engine/core/log.py -> parents[2] is the engine root, where the log has always lived.
+_LOG = Path(__file__).resolve().parents[2] / "ai-engine.log"
 _SEP = "─" * 80
 
 

@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import generate_rules as gr
-from models import GenerateRulesRequest, DimensionIn
+from engine.rules import generate_rules as gr
+from engine.core.models import GenerateRulesRequest, DimensionIn
 
 MIRROR_W = "WIDTH@Sketch1 [1011-MIRROR-CAROL-1]"
 MIRROR_H = "HEIGHT@Sketch1 [1011-MIRROR-CAROL-1]"

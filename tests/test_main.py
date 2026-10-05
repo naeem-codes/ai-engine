@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
-from models import InterpretResponse, DimensionChange
+from engine.core.models import InterpretResponse, DimensionChange
 
 
 @pytest.fixture()

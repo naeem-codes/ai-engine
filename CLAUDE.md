@@ -32,27 +32,43 @@ comments intact when editing.
 
 ```
 ai-engine/
-├── main.py                 # FastAPI app + all endpoints; frozen-aware BASE_DIR
-├── interpret.py            # THE core: resize orchestration + all followers/guards
-├── resize_policy.py        # what may resize, on which axis — single source of truth
-├── rules.py                # load rules JSON; expand_positions / expand_offsets; validate
-├── hanger_select.py        # prefab-hanger selection by glass AREA (+ height cap)
-├── generate_rules.py       # /generate-rules: LLM grouping → deterministic axis enforcement
-├── rules_store.py          # WHERE rules live + WHICH set applies (family keying)
-├── cloud_sync.py           # optional Supabase mirror (off by default)
-├── prompts.py              # the two rules system prompts
-├── llm.py                  # streaming Claude + OpenAI clients, call_llm() router
-├── models.py               # all pydantic request/response schemas
-├── log.py                  # ai-engine.log writer (log / section)
+├── main.py                 # ENTRY POINT, stays in the root: FastAPI app + all endpoints;
+│                           # frozen-aware BASE_DIR, loads .env + _baked.py (build-release.ps1)
+├── engine/                 # the package — every module below is imported as engine.<pkg>.<mod>
+│   ├── core/
+│   │   ├── models.py       # all pydantic request/response schemas
+│   │   ├── outline.py      # the mirror outline (rect/obround/ellipse) — half_width_at
+│   │   └── log.py          # ai-engine.log writer (log / section)
+│   ├── resize/
+│   │   ├── interpret.py    # THE core: resize orchestration + all followers/guards
+│   │   ├── resize_policy.py# what may resize, on which axis — single source of truth
+│   │   └── chassis_slots.py# chassis B-slot length vs chassis width
+│   ├── hangers/
+│   │   └── hanger_select.py# prefab-hanger selection by glass AREA (+ height cap)
+│   ├── rules/
+│   │   ├── rules.py        # load rules JSON; expand_positions / expand_offsets; validate
+│   │   ├── generate_rules.py # /generate-rules: LLM grouping → deterministic axis enforcement
+│   │   ├── rules_store.py  # WHERE rules live + WHICH set applies (family keying)
+│   │   └── cloud_sync.py   # optional Supabase mirror (off by default)
+│   └── llm/
+│       ├── llm.py          # streaming Claude + OpenAI clients, call_llm() router
+│       └── prompts.py      # the two rules system prompts
 ├── supabase/               # CLI project: migrations/ + config.toml (dev-only, never shipped)
 ├── tools/
 │   └── create_client_user.py # per-client Auth user + client_id claim (needs the service key)
 ├── rules/                  # LEGACY location — migrated to the data dir on startup
-├── tests/                  # 13 files / ~1.7k lines, LLM mocked
+├── tests/                  # flat, LLM mocked; patch targets use full paths
+│                           # ("engine.resize.interpret.call_llm")
 ├── ai-engine.spec          # PyInstaller → single dist/ai-engine.exe  (engine.spec = stale)
-├── .env                    # ANTHROPIC_API_KEY / OPENAI_API_KEY / DEFAULT_PROVIDER / PORT
-└── start.bat               # venv + uvicorn on :8000
+└── .env                    # ANTHROPIC_API_KEY / OPENAI_API_KEY / DEFAULT_PROVIDER / PORT
 ```
+
+**Package rules (2026-10-05 restructure).** Imports are absolute (`from engine.rules import
+rules_store as store`), never bare (`import rules_store`); the root is on `sys.path` because
+`main.py` / `uvicorn main:app` / pytest all run from it. A module that needs the engine ROOT
+(log file, legacy `rules/`, bundle dir) uses `Path(__file__).resolve().parents[2]` — NOT
+`.parent`, which is now its own sub-package folder. `main.py`, `ai-engine.spec`, the Dockerfile
+and `build-release.ps1` were deliberately left unchanged by keeping `main.py` in the root.
 
 **The engine has no drawing path.** Production drawings are built entirely by the app
 (`GenerateProductionDrawings` → `ProductionDrawingSpec` → `BuildOneDrawing`), deterministically

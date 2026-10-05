@@ -29,7 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import resize_policy as policy
+from engine.resize import resize_policy as policy
 
 # Every distinct real hanger shape on this machine: the prefab legend, a client CUSTOM copy,
 # and JEN's second hanger.
@@ -75,7 +75,7 @@ def test_the_template_is_free_to_follow_the_glass():
     `D1@Sketch1` is 48.000in, exactly the master, so it clears the frame-spanning bar and the
     constant offset gives 55.000in. Nothing else was ever in the way.
     """
-    import interpret
+    from engine.resize import interpret
     IN = 0.0254
     dim = "D1@Sketch1 [LUCY 48-HANGER TEMPLATE-B-1]"
     allowed, blocked = policy.filter_axis_dims([dim], "width", None, {dim: 48.0 * IN})

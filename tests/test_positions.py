@@ -3,9 +3,9 @@ import json
 import pytest
 from unittest.mock import patch, AsyncMock
 
-import rules
-from models import InterpretRequest, DimensionIn
-from interpret import interpret
+from engine.rules import rules
+from engine.core.models import InterpretRequest, DimensionIn
+from engine.resize.interpret import interpret
 
 
 def _kelly():
@@ -98,7 +98,7 @@ async def test_interpret_appends_position_change(pos_rules_dir):
         "rule": {"if_changes": "WIDTH@Mirror", "also_change": ["CHASSIS_W@Chassis"]},
         "value_meters": 0.762,   # grow to 30 in
     })
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm_json)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm_json)):
         result = await interpret(InterpretRequest(
             instruction="make it 30 inches wide",
             dimensions=dims,

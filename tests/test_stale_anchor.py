@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import rules_store as store
+from engine.rules import rules_store as store
 
 MODEL = "C:\\m\\HALO-30.00.SLDASM"
 LIVE_MASTER = "D1@Sketch1 [HALO-70-MIRROR-1]"

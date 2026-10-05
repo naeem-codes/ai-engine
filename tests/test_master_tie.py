@@ -27,9 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import rules
-from interpret import interpret
-from models import DimensionIn, InterpretRequest
+from engine.rules import rules
+from engine.resize.interpret import interpret
+from engine.core.models import DimensionIn, InterpretRequest
 
 IN = 0.0254
 GLASS = "D1@Sketch1 [1026-MIRROR-ECLIPSE-1]"            # 30.000" — the real master
@@ -67,7 +67,7 @@ async def _resize(rules_dir, master, llm_anchor, target_in=45):
     also = [CHASSIS, LED] if llm_anchor == GLASS else [CHASSIS]
     llm = json.dumps({"rule": {"if_changes": llm_anchor, "also_change": also},
                       "value_meters": target_in * IN, "scope": "overall"})
-    with patch("interpret.call_llm", new=AsyncMock(return_value=llm)):
+    with patch("engine.resize.interpret.call_llm", new=AsyncMock(return_value=llm)):
         return await interpret(InterpretRequest(
             instruction=f"Resize to {target_in}.00",
             dimensions=[DimensionIn(name=n, value_meters=v) for n, v in DIMS.items()],

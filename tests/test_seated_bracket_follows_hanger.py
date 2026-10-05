@@ -27,8 +27,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from interpret import _mate_position_updates
-from models import (DimensionChange, DimensionIn, HangerSelection, InterpretRequest,
+from engine.resize.interpret import _mate_position_updates
+from engine.core.models import (DimensionChange, DimensionIn, HangerSelection, InterpretRequest,
                     MatePositionIn)
 
 IN = 0.0254
@@ -139,7 +139,7 @@ def test_the_bracket_stays_well_inside_the_rim():
     On the 40x52 the chassis ellipse is 39.5 x 51.5, so at the bracket's own height the shell is
     much wider than where the bracket now sits. The old +5.000" answer was what walked it out.
     """
-    import outline
+    from engine.core import outline
     out = _by_dim(_mate_position_updates(_req(), _grown(), _hanger()))
     half_w, half_h = 39.5 / 2, 51.5 / 2
     # Held on H, so it stays at 8.812" off centre; W comes back to 11.000".

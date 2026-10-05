@@ -1,7 +1,7 @@
 import json
 import os
 import httpx
-from log import log, section
+from engine.core.log import log, section
 
 
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"

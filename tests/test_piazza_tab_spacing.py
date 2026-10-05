@@ -29,11 +29,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import generate_rules
-import hanger_select
-import interpret
-from models import DimensionIn, GenerateRulesRequest, InterpretRequest, SkipEntry
-from rules import ModelRules, OffsetRuleEntry
+from engine.rules import generate_rules
+from engine.hangers import hanger_select
+from engine.resize import interpret
+from engine.core.models import DimensionIn, GenerateRulesRequest, InterpretRequest, SkipEntry
+from engine.rules.rules import ModelRules, OffsetRuleEntry
 
 IN = 0.0254
 

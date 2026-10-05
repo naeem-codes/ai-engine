@@ -20,8 +20,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from interpret import _enforce_policy, _is_the_glass_circle
-from models import DimensionChange, DimensionIn, InterpretRequest
+from engine.resize.interpret import _enforce_policy, _is_the_glass_circle
+from engine.core.models import DimensionChange, DimensionIn, InterpretRequest
 
 IN = 0.0254
 GLASS = "D1@Sketch1 [HALO-30-MIRROR-1]"
@@ -97,7 +97,7 @@ def test_a_rectangular_product_is_untouched():
 
 
 def test_the_tolerance_window_is_where_it_says_it_is():
-    from interpret import SAME_CIRCLE_FRACTION
+    from engine.resize.interpret import SAME_CIRCLE_FRACTION
     edge = 762.00 * (1 + SAME_CIRCLE_FRACTION) / 1000
     near = dict(CURRENT, **{BRACKET: edge - 1e-9})
     far = dict(CURRENT, **{BRACKET: edge * 1.01})

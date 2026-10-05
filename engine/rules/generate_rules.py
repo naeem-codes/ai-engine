@@ -1,11 +1,11 @@
 import json
-import hanger_select
-import resize_policy as policy
-from models import (GenerateRulesRequest, GenerateRulesResponse, OffsetRule, RulePair,
+from engine.hangers import hanger_select
+from engine.resize import resize_policy as policy
+from engine.core.models import (GenerateRulesRequest, GenerateRulesResponse, OffsetRule, RulePair,
                     SkipEntry)
-from llm import call_llm
-from prompts import rules_system_prompt
-from log import log, section
+from engine.llm.llm import call_llm
+from engine.llm.prompts import rules_system_prompt
+from engine.core.log import log, section
 
 
 def _strip_fences(text: str) -> str:

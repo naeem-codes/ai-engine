@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 
-import outline
+from engine.core import outline
 
 
 class DimensionIn(BaseModel):

@@ -12,9 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import resize_policy as policy
-from interpret import _dependent_value, _enforce_policy
-from models import DimensionChange
+from engine.resize import resize_policy as policy
+from engine.resize.interpret import _dependent_value, _enforce_policy
+from engine.core.models import DimensionChange
 
 MIRROR_W = "WIDTH@Sketch1 [1011-MIRROR-CAROL-1]"
 MIRROR_H = "HEIGHT@Sketch1 [1011-MIRROR-CAROL-1]"
