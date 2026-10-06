@@ -166,6 +166,15 @@ class InterpretRequest(BaseModel):
     outline_w_meters: float = 0.0
     outline_h_meters: float = 0.0
 
+    # ── OVAL ring (MICHELLE) ─────────────────────────────────────────────────────
+    # The INNER surface of the oval ring, as half-width and half-height on the glass's W/H axes,
+    # read by the app off the ring's elliptical sketch BEFORE this resize. The positioned hardware
+    # inside the ring has to stay inside it: live 2026-10-06, MICHELLE 30x42 -> 50x62 moved the
+    # bottom hanging brackets +10"/+10" by the rectangle rule and both finished 2.3" OUTSIDE the
+    # ring (ISSUE-094). 0 = no oval ring / an older app, which leaves today's behaviour untouched.
+    ring_half_w_meters: float = 0.0
+    ring_half_h_meters: float = 0.0
+
     @property
     def is_round(self) -> bool:
         return (self.shape or "").strip().lower() == "round"

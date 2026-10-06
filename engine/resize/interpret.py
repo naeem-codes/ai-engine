@@ -525,6 +525,11 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
     elif not half_delta and not seat_shifts:
         return []
 
+    # An OVAL ring the hardware sits inside (MICHELLE). None on every other product. The pull is
+    # ONE factor for the whole bracket + clip stack, so the parts bolted together stay together.
+    ring = _oval_ring(req, applied, current)
+    ring_pull = _oval_ring_pull(req, ring)
+
     # The MASTER's own component must never be moved by its own resize. The real AMBER carries
     # `Distance7 = 6.000" [assembly plane <-> 1011-MIRROR-CAROL-1]`, so the glass itself is pinned
     # to an assembly plane; shifting that would slide the master and desynchronise everything
@@ -553,6 +558,11 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
             shift = half_delta.get(mate.axis)
             if shift is None:
                 continue
+        # Inside an oval ring the bracket + clip stack keeps its SHARE of the ring, not its
+        # distance from the bounding box's edges — see `_oval_ring_shift`.
+        ring_shift = None if mate.on_hanger else _oval_ring_shift(mate, ring, req, ring_pull)
+        if ring_shift is not None:
+            shift = ring_shift
         if mate.dim in applied or mate.dim in seen:
             continue          # already being written — never shift a value twice
         if mate.component in master_comps:
@@ -570,8 +580,9 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
 
         # A clip lines up with the hanging tabs when those moved — same load path, and it
         # replaces the edge offset rather than adjusting it.
+        # Not inside an oval ring: there the clip rides on its bracket and moves with it.
         tab_half = (_clip_tab_alignment(hanger, changes)
-                    if mate.axis == "W" and not req.is_round else None)
+                    if mate.axis == "W" and not req.is_round and ring_shift is None else None)
         if tab_half and policy.is_clip(mate.component, req.component_types):
             log(f"  [MATE] {mate.dim} aligned to the hanging tabs at "
                 f"{tab_half / 0.0254:.3f}\" (was heading for {new_val / 0.0254:.3f}\")")
@@ -589,6 +600,9 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
         why = (f"moved {shift / 0.0254:+.3f}\" with the hanger's {mate.axis} edge, so its tab "
                f"stays in the slot"
                if mate.on_hanger else
+               f"moved {shift / 0.0254:+.3f}\" in proportion to the oval ring, so it keeps its "
+               f"place inside the ring"
+               if ring_shift is not None else
                f"moved {shift / 0.0254:+.3f}\" along its own radius, so it keeps its share of "
                f"the disc without fouling the LED"
                if req.is_round else
@@ -605,6 +619,141 @@ def _mate_position_updates(req: InterpretRequest, changes: list[DimensionChange]
 # and it also absorbs the chassis disc being drawn a touch inside the glass (ECLIPSE: 59.500"
 # of chassis inside a 60.000" mirror), which is the circle the parts actually have to sit on.
 ROUND_RIM_MARGIN_M = 0.25 * 0.0254
+
+# Clear space a part keeps from the INNER surface of an oval ring. The same quarter inch as the
+# round rim; a part BUILT closer than this is only held off the ring itself, never pushed in.
+OVAL_RING_MARGIN_M = 0.25 * 0.0254
+
+
+def _oval_ring(req: InterpretRequest, applied: dict[str, float], current: dict[str, float],
+               ) -> tuple[float, float, float, float] | None:
+    """The oval ring's inner half-width and half-height, before and after this resize, in metres.
+
+    None unless the app measured a ring (MICHELLE's `12457-OVAL RING`); never on a ROUND product,
+    which has its own radial path in `_round_shifts`.
+
+    The AFTER size is the app's own law, not a guess: `OvalRingGeometry.Resize` grows each
+    semi-axis by HALF the glass change on that axis (a constant inset). The two must stay in step
+    — if the app ever resizes the ring another way, this has to follow it.
+    """
+    if req.is_round:
+        return None
+    rw, rh = req.ring_half_w_meters, req.ring_half_h_meters
+    if rw <= 0 or rh <= 0:
+        return None
+
+    def delta(master: str | None) -> float:
+        if master and master in applied and master in current:
+            return applied[master] - current[master]
+        return 0.0
+
+    rw2 = rw + delta(req.master_width_dim) / 2.0
+    rh2 = rh + delta(req.master_height_dim) / 2.0
+    if rw2 <= 0 or rh2 <= 0:
+        return None
+    log(f"  [RING] oval ring inner half-axes {rw / 0.0254:.3f} x {rh / 0.0254:.3f}\" → "
+        f"{rw2 / 0.0254:.3f} x {rh2 / 0.0254:.3f}\" (W x H)")
+    return rw, rh, rw2, rh2
+
+
+def _ring_stack_member(mate, req: InterpretRequest) -> bool:
+    """A part of the hardware STACK inside an oval ring: a hanging bracket, or a clip.
+
+    They travel as one. MICHELLE's `1005-CLIP-2` is mated onto `1411-HANGING-BRACKET-3` — its
+    `Jog4` sits on the bracket's `Edge-Flange1` — and as built both sit 4.000" off centre. Moving
+    the bracket by the ring and the clip by the edge rule split them on 30x42 -> 50x62 (bracket
+    7.262", clip 14.000"), the same lesson `_round_shifts` carries for ECLIPSE: two parts in one
+    stack cannot be moved by two different rules and still touch.
+    """
+    return (policy.is_hanging_bracket(mate.component, req.component_types)
+            or policy.is_clip(mate.component, req.component_types))
+
+
+def _oval_ring_shift(mate, ring: tuple[float, float, float, float] | None,
+                     req: InterpretRequest, pull: float = 1.0) -> float | None:
+    """How far a bracket or clip inside an oval ring moves outward: PROPORTIONAL to the ring.
+
+    The rectangle rule holds a part's distance from the side edge and from the top/bottom edge
+    separately. On an ellipse that drives it diagonally into the corner, where the outline has
+    already curved in: MICHELLE 30x42 -> 50x62 took `1411-HANGING-BRACKET-3` from (4.000",
+    -15.188") to (14.000", -25.187") and 2.3" outside the ring (ISSUE-094). Scaling each
+    coordinate by the ring's own growth on that axis keeps the part at the same place on the
+    ring — (7.262", -23.504") there, 1.6" clear of it.
+
+    `pull` (<= 1) is the ONE factor `_oval_ring_pull` found for the whole stack; it only ever
+    bites on a shrink. A part seated in the hanger's slots never comes here — it follows the
+    hanger. Everything else (the power supply) keeps the edge rule. None = not this rule.
+    """
+    if ring is None or mate.axis not in ("W", "H") or abs(mate.offset_meters) < 1e-9:
+        return None
+    if not _ring_stack_member(mate, req):
+        return None
+    before, after = (ring[0], ring[2]) if mate.axis == "W" else (ring[1], ring[3])
+    return abs(mate.offset_meters) * (after / before * pull - 1.0)
+
+
+def _oval_ring_pull(req: InterpretRequest, ring: tuple[float, float, float, float] | None,
+                    ) -> float:
+    """ONE factor (<= 1) for the bracket + clip stack, so every hanging BRACKET clears the ring.
+
+    Only the brackets are checked, by the user's rule (2026-10-06): their position was right and
+    nothing else needs policing. Growing never needs it — a part that cleared the ring as built
+    clears it after any proportional growth — so this is 1.0 on every grow and only bites on a
+    shrink, where a fixed-size bracket gets relatively bigger against a smaller ring.
+
+    The test is the bracket's OUTER corner against the ring's inner surface less a 1/4" margin
+    (an ellipse's first point to cross is the corner of an axis-aligned part). A bracket built
+    closer than the margin is only held off the ring itself; one built outside it is skipped.
+    The clips ride on the same factor, so the stack moves in toward the centre as one.
+    """
+    if ring is None:
+        return 1.0
+    rw, rh, rw2, rh2 = ring
+    brackets: dict[str, dict[str, tuple[float, float]]] = {}
+    for m in req.mate_positions:
+        if (m.on_hanger or m.axis not in ("W", "H") or abs(m.offset_meters) < 1e-9
+                or not policy.is_hanging_bracket(m.component, req.component_types)):
+            continue
+        brackets.setdefault(m.component, {})[m.axis] = (abs(m.offset_meters), m.extent_meters / 2.0)
+
+    pull, tightest = 1.0, ""
+    for comp, axes in brackets.items():
+        if "W" not in axes or "H" not in axes:
+            continue                       # both coordinates are needed to place it on an ellipse
+        (x, hw), (y, hh) = axes["W"], axes["H"]
+        kx, ky = rw2 / rw, rh2 / rh
+
+        def fits(t: float, a: float, b: float) -> bool:
+            return a > 0 and b > 0 and ((x * kx * t + hw) / a) ** 2 + ((y * ky * t + hh) / b) ** 2 <= 1.0 + 1e-9
+
+        def built_fits(a: float, b: float) -> bool:
+            return a > 0 and b > 0 and ((x + hw) / a) ** 2 + ((y + hh) / b) ** 2 <= 1.0 + 1e-9
+
+        if built_fits(rw - OVAL_RING_MARGIN_M, rh - OVAL_RING_MARGIN_M):
+            margin = OVAL_RING_MARGIN_M
+        elif built_fits(rw, rh):
+            margin = 0.0
+        else:
+            log(f"  [RING] {comp} was built outside the oval ring — not held to it")
+            continue
+        a, b = rw2 - margin, rh2 - margin
+        if fits(1.0, a, b):
+            continue
+        if not fits(0.0, a, b):
+            _warn(f"[RING] {comp} cannot clear the oval ring even on the centre line — the ring is "
+                  f"too small for this bracket at this size")
+            continue
+        lo, hi = 0.0, 1.0
+        for _ in range(60):
+            mid = (lo + hi) / 2.0
+            lo, hi = (mid, hi) if fits(mid, a, b) else (lo, mid)
+        if lo < pull:
+            pull, tightest = lo, comp
+    if pull < 1.0:
+        log(f"  [RING] the bracket + clip stack is held to {pull:.4f} of its proportional "
+            f"position — {tightest} would otherwise come within {OVAL_RING_MARGIN_M / 0.0254:.2f}\" "
+            f"of the ring. One factor for the stack, so the clips stay on their brackets.")
+    return pull
 
 
 def _hanger_seat_shifts(req: InterpretRequest, applied: dict[str, float],
@@ -829,7 +978,11 @@ def _mate_position_floor(mate, applied: dict[str, float], current: dict[str, flo
     # went to 6.000", and again at 36/6 = 6.000" against 4.800" - so `Jog4` on the clip walked off
     # `Edge-Flange1` on the bracket by a size-dependent amount every single resize (reported live
     # 2026-09-14). The geometric no-overlap bound below is real on any shape and still applies.
-    is_clip = policy.is_clip(mate.component, req.component_types) and not req.is_round
+    # The same is true inside an OVAL ring: MICHELLE's clip rides on its hanging bracket, and
+    # master/6 = 8.333" at 50" would have pulled it off the bracket's 7.262" (ISSUE-094).
+    in_oval_ring = req.ring_half_w_meters > 0 and req.ring_half_h_meters > 0
+    is_clip = (policy.is_clip(mate.component, req.component_types)
+               and not req.is_round and not in_oval_ring)
     proportional = master_new / 6.0 if (is_clip and master_new > 0) else 0.0
     no_overlap = mate.extent_meters / 2.0 + 0.25 * 0.0254 if mate.extent_meters > 0 else 0.0
     return max(proportional, no_overlap)
